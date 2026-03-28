@@ -136,6 +136,8 @@ export default function OptionChain({ indexId, onAdd }) {
                               strike: strikeNum,
                               side: "CE",
                               exchange: data.exchange,
+                              expiry: data.expiry,
+                              indexId,
                             })
                           }
                         >
@@ -189,6 +191,8 @@ export default function OptionChain({ indexId, onAdd }) {
                               strike: strikeNum,
                               side: "PE",
                               exchange: data.exchange,
+                              expiry: data.expiry,
+                              indexId,
                             })
                           }
                         >

@@ -7,3 +7,7 @@ pyotp
 requests
 pandas
 NorenRestApiPy
+
+kiteconnect
+Click
+six

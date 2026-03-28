@@ -337,6 +337,23 @@ body {
   font-size: 12px;
 }
 
+.basket-item-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.btn-edit {
+  color: var(--text-dim);
+  border-color: var(--border);
+}
+
+.btn-edit:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(99, 102, 241, 0.1);
+}
+
 .basket-empty {
   color: var(--text-dim);
   text-align: center;
@@ -347,6 +364,67 @@ body {
 .basket-footer {
   padding: 10px 14px;
   border-top: 1px solid var(--border);
+}
+
+/* ── Margin display ──────────────────────────────────────── */
+.margin-section {
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: rgba(99, 102, 241, 0.04);
+}
+
+.margin-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.margin-row span:last-child {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.margin-total {
+  font-size: 13px;
+  font-weight: 600;
+  padding-bottom: 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.margin-total span:first-child {
+  color: var(--text);
+}
+
+.margin-total span:last-child {
+  color: var(--yellow);
+  font-size: 14px;
+}
+
+.margin-benefit span:last-child {
+  color: var(--green);
+}
+
+.margin-premium span:last-child {
+  color: var(--green);
+}
+
+.margin-loading {
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 6px 0;
+  animation: pulse 1s infinite;
+}
+
+.margin-error {
+  color: var(--red);
+  font-size: 12px;
+  padding: 4px 0;
 }
 
 /* ── Order tracker ────────────────────────────────────── */
@@ -428,6 +506,139 @@ body {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+/* ── Lot stepper ─────────────────────────────────────── */
+.lot-stepper {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface2);
+}
+
+.lot-stepper-btn {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface2);
+  border: none;
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+
+.lot-stepper-btn:hover:not(:disabled) {
+  background: var(--border);
+}
+
+.lot-stepper-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.lot-stepper-input {
+  flex: 1;
+  text-align: center;
+  border: none;
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 600;
+  padding: 8px 4px;
+  outline: none;
+  -moz-appearance: textfield;
+}
+
+.lot-stepper-input::-webkit-outer-spin-button,
+.lot-stepper-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* ── Confirm modal ───────────────────────────────────── */
+.confirm-modal {
+  width: 420px;
+}
+
+.confirm-title {
+  color: var(--yellow);
+}
+
+.confirm-subtitle {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 16px;
+  line-height: 1.6;
+}
+
+.confirm-orders {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.confirm-order-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 5px 0;
+  font-size: 13px;
+  border-bottom: 1px solid var(--border);
+}
+
+.confirm-order-row:last-child {
+  border-bottom: none;
+}
+
+.confirm-order-sym {
+  font-weight: 500;
+}
+
+.confirm-order-detail {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.confirm-margin {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 12px;
+}
+
+.confirm-margin strong {
+  color: var(--yellow);
+}
+
+.confirm-warning {
+  font-size: 12px;
+  color: var(--red);
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin-bottom: 16px;
+}
+
+.confirm-execute-btn {
+  background: #b91c1c;
+  border-color: #b91c1c;
+}
+
+.confirm-execute-btn:hover:not(:disabled) {
+  background: #991b1b;
 }
 
 /* ── Spot info bar ────────────────────────────────────── */

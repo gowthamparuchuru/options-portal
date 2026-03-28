@@ -12,7 +12,12 @@ import pyotp
 import requests
 from NorenRestApiPy.NorenApi import NorenApi
 
-from .interface import BrokerInterface
+from .interface import BrokerInterface, ProductType, OrderType, TransactionType
+
+MONTH_ABBR = {
+    1: "JAN", 2: "FEB", 3: "MAR", 4: "APR", 5: "MAY", 6: "JUN",
+    7: "JUL", 8: "AUG", 9: "SEP", 10: "OCT", 11: "NOV", 12: "DEC",
+}
 
 log = logging.getLogger("shoonya")
 
@@ -52,10 +57,56 @@ class ShoonyaBroker(BrokerInterface):
         },
     }
 
+    PRODUCT_MAP = {
+        ProductType.INTRADAY: "I",
+        ProductType.OVERNIGHT: "M",
+        ProductType.DELIVERY: "C",
+    }
+
+    ORDER_TYPE_MAP = {
+        OrderType.MARKET: "MKT",
+        OrderType.LIMIT: "LMT",
+        OrderType.SL: "SL-LMT",
+        OrderType.SL_M: "SL-MKT",
+    }
+
+    TRANSACTION_MAP = {
+        TransactionType.BUY: "B",
+        TransactionType.SELL: "S",
+    }
+
+    SYMBOL_PREFIX = {
+        "NIFTY": "NIFTY",
+        "SENSEX": "SENSEX",
+    }
+
     def __init__(self, config: dict):
         self._cfg = config
         self._api = _ShoonyaApi()
         self._logged_in = False
+
+    # ── Symbol building ────────────────────────────────────────────
+
+    def build_trading_symbol(self, index_name: str, expiry: date,
+                              strike: float, option_type: str) -> str:
+        prefix = self.SYMBOL_PREFIX.get(index_name, index_name)
+        dd = f"{expiry.day:02d}"
+        mon = MONTH_ABBR[expiry.month]
+        yy = f"{expiry.year % 100:02d}"
+        ot = option_type[0]  # "CE" → "C", "PE" → "P"
+        strike_str = str(int(strike)) if strike == int(strike) else str(strike)
+        return f"{prefix}{dd}{mon}{yy}{ot}{strike_str}"
+
+    # ── Enum resolution ────────────────────────────────────────────
+
+    def resolve_product_type(self, product_type: ProductType) -> str:
+        return self.PRODUCT_MAP[product_type]
+
+    def resolve_order_type(self, order_type: OrderType) -> str:
+        return self.ORDER_TYPE_MAP[order_type]
+
+    def resolve_transaction_type(self, txn_type: TransactionType) -> str:
+        return self.TRANSACTION_MAP[txn_type]
 
     # ── Auth ──────────────────────────────────────────────────────
 
@@ -170,8 +221,20 @@ class ShoonyaBroker(BrokerInterface):
             socket_close_callback=on_close,
         )
 
+    def stop_websocket(self):
+        try:
+            self._api.close_websocket()
+        except Exception:
+            log.exception("Error closing Shoonya WS")
+
     def subscribe(self, tokens: list[str]):
         self._api.subscribe(tokens)
+
+    def unsubscribe(self, tokens: list[str]):
+        try:
+            self._api.unsubscribe(tokens)
+        except Exception:
+            log.exception("Error unsubscribing tokens")
 
     # ── Orders ────────────────────────────────────────────────────
 

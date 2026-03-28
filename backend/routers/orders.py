@@ -1,11 +1,13 @@
 import asyncio
 import logging
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
-from ..models import ExecuteBasketRequest, BasketItem
+from ..models import ExecuteBasketRequest, BasketItem, MarginRequest, MarginResponse
 from ..broker.shoonya_broker import ShoonyaBroker
+from ..broker.zerodha_broker import ZerodhaBroker
 
 router = APIRouter()
 log = logging.getLogger("orders")
@@ -134,6 +136,38 @@ async def _smart_sell_one(broker: ShoonyaBroker, item: BasketItem, statuses: dic
     if not filled:
         statuses[sym]["status"] = "PENDING"
         statuses[sym]["error"] = "Not filled after all attempts"
+
+
+@router.post("/margin", response_model=MarginResponse)
+async def calculate_basket_margin(req: MarginRequest, request: Request):
+    margin_broker: ZerodhaBroker | None = request.app.state.margin_broker
+    if margin_broker is None:
+        return MarginResponse(error="Margin calculation not available (Zerodha not configured)")
+
+    if not margin_broker.is_logged_in():
+        result = margin_broker.login()
+        if not result.get("ok"):
+            return MarginResponse(error=f"Zerodha login failed: {result.get('error')}")
+
+    kite_orders = []
+    for item in req.orders:
+        try:
+            expiry_date = datetime.strptime(item.expiry, "%d-%b-%Y").date()
+        except ValueError:
+            return MarginResponse(error=f"Invalid expiry format: {item.expiry}")
+
+        tradingsymbol = margin_broker.build_trading_symbol(
+            item.index_id, expiry_date, item.strike, item.option_type,
+        )
+        kite_orders.append({
+            "exchange": item.exchange,
+            "tradingsymbol": tradingsymbol,
+            "transaction_type": "SELL",
+            "quantity": item.lots * item.lot_size,
+        })
+
+    result = margin_broker.get_basket_margin(kite_orders)
+    return MarginResponse(**result)
 
 
 @router.get("/status/{exec_id}")

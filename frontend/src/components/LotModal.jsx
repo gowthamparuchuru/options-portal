@@ -18,6 +18,8 @@ export default function LotModal({ strike, onConfirm, onClose }) {
       option_type: side,
       lots: Number(lots),
       lot_size: lotSize,
+      index_id: strike.indexId,
+      expiry: strike.expiry,
     });
   };
 
@@ -38,14 +40,33 @@ export default function LotModal({ strike, onConfirm, onClose }) {
           </div>
           <div className="modal-field">
             <label>Number of Lots</label>
-            <input
-              type="number"
-              min="1"
-              max="100"
-              value={lots}
-              onChange={(e) => setLots(e.target.value)}
-              autoFocus
-            />
+            <div className="lot-stepper">
+              <button
+                type="button"
+                className="lot-stepper-btn"
+                onClick={() => setLots((l) => Math.max(1, Number(l) - 1))}
+                disabled={lots <= 1}
+              >
+                −
+              </button>
+              <input
+                type="number"
+                min="1"
+                max="100"
+                value={lots}
+                onChange={(e) => setLots(e.target.value)}
+                className="lot-stepper-input"
+                autoFocus
+              />
+              <button
+                type="button"
+                className="lot-stepper-btn"
+                onClick={() => setLots((l) => Math.min(100, Number(l) + 1))}
+                disabled={lots >= 100}
+              >
+                +
+              </button>
+            </div>
           </div>
           <div style={{ fontSize: 13, color: "var(--text-dim)", marginBottom: 16 }}>
             Total quantity: {lots * lotSize}

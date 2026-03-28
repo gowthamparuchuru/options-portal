@@ -1,0 +1,7 @@
+# Nifty 
+Weekly Symbol = NIFTY2640723000CE
+Monthly Symbol = NIFTY26MAR23000CE
+
+# Sensex
+Weekly Symbol = SENSEX2640274000CE
+Monthly Symbol = SENSEX26MAY74000CE

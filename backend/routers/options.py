@@ -74,6 +74,9 @@ async def get_option_chain_snapshot(index_id: str, request: Request):
     return chain
 
 
+ORPHAN_TIMEOUT_SECS = 30 * 60
+
+
 class _LiveFeed:
     """Manages one Shoonya WS connection and fans out ticks to browser clients."""
 
@@ -82,6 +85,9 @@ class _LiveFeed:
         self.prices: dict[str, float] = {}
         self.connected = False
         self._started = False
+        self._client_count = 0
+        self._last_client_left: float | None = None
+        self._broker: ShoonyaBroker | None = None
 
     def on_tick(self, tick):
         tk = tick.get("tk")
@@ -104,8 +110,54 @@ class _LiveFeed:
         with self.lock:
             return dict(self.prices)
 
+    def add_client(self):
+        with self.lock:
+            self._client_count += 1
+            self._last_client_left = None
+        log.info("Browser client connected (active: %d)", self._client_count)
+
+    def remove_client(self):
+        with self.lock:
+            self._client_count = max(0, self._client_count - 1)
+            if self._client_count == 0:
+                self._last_client_left = time.time()
+        log.info("Browser client disconnected (active: %d)", self._client_count)
+
+    def is_orphaned(self) -> bool:
+        with self.lock:
+            return (
+                self._started
+                and self._client_count == 0
+                and self._last_client_left is not None
+                and time.time() - self._last_client_left > ORPHAN_TIMEOUT_SECS
+            )
+
+    def shutdown(self):
+        with self.lock:
+            if not self._started:
+                return
+            broker = self._broker
+            self._started = False
+            self.connected = False
+            self.prices.clear()
+            self._broker = None
+            self._last_client_left = None
+        if broker:
+            log.info("Stopping Shoonya WS feed")
+            broker.stop_websocket()
+
 
 _feed = _LiveFeed()
+
+
+async def run_orphan_watcher():
+    """Background task: closes Shoonya WS if no browser clients for 30 min."""
+    while True:
+        await asyncio.sleep(60)
+        if _feed.is_orphaned():
+            log.info("Shoonya WS orphaned for >%d min — shutting down",
+                     ORPHAN_TIMEOUT_SECS // 60)
+            _feed.shutdown()
 
 
 @router.websocket("/ws/{index_id}")
@@ -171,6 +223,7 @@ async def option_chain_ws(ws: WebSocket, index_id: str):
             tokens_to_sub.append(f"{idx_cfg['options_exchange']}|{s_data['pe_token']}")
 
     if not _feed._started:
+        _feed._broker = broker
         broker.start_websocket(_feed.on_tick, _feed.on_open, _feed.on_close)
         _feed._started = True
         await asyncio.sleep(2)
@@ -187,6 +240,7 @@ async def option_chain_ws(ws: WebSocket, index_id: str):
         "atm": chain["atm"],
     })
 
+    _feed.add_client()
     try:
         while True:
             prices = _feed.snapshot()
@@ -197,3 +251,5 @@ async def option_chain_ws(ws: WebSocket, index_id: str):
         log.info("Browser WS disconnected")
     except Exception as e:
         log.exception("WS error")
+    finally:
+        _feed.remove_client()

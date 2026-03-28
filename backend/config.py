@@ -12,6 +12,12 @@ REQUIRED_ENV_VARS = [
     "SHOONYA_TOTP_SECRET",
 ]
 
+ZERODHA_ENV_VARS = [
+    "ZERODHA_USER_ID",
+    "ZERODHA_PASSWORD",
+    "ZERODHA_TOTP_SECRET",
+]
+
 
 def load_config() -> dict:
     """Load broker credentials from .env in sibling shoonya-script folder or project root."""
@@ -44,4 +50,14 @@ def load_config() -> dict:
     if missing:
         raise RuntimeError(f"Missing env vars: {', '.join(missing)}")
 
+    for var in ZERODHA_ENV_VARS:
+        val = os.getenv(var)
+        if val and not val.startswith("your_"):
+            config[var] = val
+
     return config
+
+
+def has_zerodha_config(config: dict) -> bool:
+    """Check if all Zerodha credentials are present."""
+    return all(var in config for var in ZERODHA_ENV_VARS)

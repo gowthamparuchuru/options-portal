@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -6,9 +7,11 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from .config import load_config
+from .config import load_config, has_zerodha_config
 from .broker.shoonya_broker import ShoonyaBroker
+from .broker.zerodha_broker import ZerodhaBroker
 from .routers import auth, options, orders
+from .routers.options import _feed, run_orphan_watcher
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,9 +30,27 @@ async def lifespan(app: FastAPI):
     app.state.broker = broker
     app.state.config = cfg
     app.state.active_executions = {}
-    log.info("App started — broker ready")
+
+    app.state.margin_broker = None
+    if has_zerodha_config(cfg):
+        margin_broker = ZerodhaBroker(cfg)
+        result = margin_broker.login()
+        if result.get("ok"):
+            app.state.margin_broker = margin_broker
+            log.info("Zerodha margin broker ready")
+        else:
+            log.warning("Zerodha login failed: %s — margin calculation disabled",
+                        result.get("error"))
+    else:
+        log.info("Zerodha credentials not configured — margin calculation disabled")
+
+    watcher_task = asyncio.create_task(run_orphan_watcher())
+    log.info("App started — broker ready (orphan watcher active)")
     yield
-    log.info("Shutting down")
+
+    watcher_task.cancel()
+    _feed.shutdown()
+    log.info("Shutting down — feeds closed")
 
 
 app = FastAPI(title="Options Portal", lifespan=lifespan)
