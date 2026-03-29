@@ -101,7 +101,7 @@ body {
 
 .content-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1.2fr 0.8fr;
   gap: 16px;
   align-items: start;
 }
@@ -673,6 +673,40 @@ body {
   background: var(--red);
 }
 
+/* ── Chart ────────────────────────────────────────────── */
+.chart-column {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chart-panel {
+  border-radius: var(--radius);
+}
+
+.chart-pct {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.chart-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(26, 29, 39, 0.85);
+  color: var(--text-dim);
+  font-size: 13px;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.chart-overlay-error {
+  color: var(--red);
+}
+
 /* ── Scrollbar ────────────────────────────────────────── */
 ::-webkit-scrollbar {
   width: 6px;
@@ -688,8 +722,20 @@ body {
 }
 
 /* ── Responsive ───────────────────────────────────────── */
+@media (max-width: 1200px) {
+  .content-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .chart-column {
+    grid-column: 1 / -1;
+  }
+}
+
 @media (max-width: 900px) {
   .content-grid {
     grid-template-columns: 1fr;
+  }
+  .chart-column {
+    grid-column: auto;
   }
 }

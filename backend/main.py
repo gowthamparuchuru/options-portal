@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse
 
 from .config import load_config, has_zerodha_config
 from .broker.shoonya_broker import ShoonyaBroker
-from .broker.zerodha_broker import ZerodhaBroker
+from .broker.zerodha_broker import ZerodhaBroker, KITE_INDEX_TOKENS
 from .routers import auth, options, orders
 from .routers.options import _feed, run_orphan_watcher
 
@@ -38,6 +38,7 @@ async def lifespan(app: FastAPI):
         if result.get("ok"):
             app.state.margin_broker = margin_broker
             log.info("Zerodha margin broker ready")
+            margin_broker.start_kite_ticker(list(KITE_INDEX_TOKENS.values()))
         else:
             log.warning("Zerodha login failed: %s — margin calculation disabled",
                         result.get("error"))
@@ -50,6 +51,8 @@ async def lifespan(app: FastAPI):
 
     watcher_task.cancel()
     _feed.shutdown()
+    if app.state.margin_broker:
+        app.state.margin_broker.stop_kite_ticker()
     log.info("Shutting down — feeds closed")
 
 

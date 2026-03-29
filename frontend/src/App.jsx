@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import LoginStatus from "./components/LoginStatus";
 import IndexSelector from "./components/IndexSelector";
 import OptionChain from "./components/OptionChain";
+import SpotChart from "./components/SpotChart";
 import Basket from "./components/Basket";
 import LotModal from "./components/LotModal";
 import ConfirmModal from "./components/ConfirmModal";
@@ -15,6 +16,7 @@ export default function App() {
   const [modal, setModal] = useState(null);
   const [editModal, setEditModal] = useState(null);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [spotPrice, setSpotPrice] = useState(null);
   const [execId, setExecId] = useState(null);
   const [margin, setMargin] = useState({
     total_margin: 0, span: 0, exposure: 0,
@@ -148,9 +150,21 @@ export default function App() {
           </div>
 
           <div className="content-grid">
+            <div className="chart-column">
+              {chainActive && selectedIndex && (
+                <SpotChart indexId={selectedIndex} spotPrice={spotPrice} />
+              )}
+              <SpotChart indexId="GIFTNIFTY" liveEndpoint="/api/options/kite-ws" />
+              <SpotChart indexId="INDIAVIX" liveEndpoint="/api/options/kite-ws" />
+            </div>
+
             <div className="chain-panel">
               {chainActive && selectedIndex && (
-                <OptionChain indexId={selectedIndex} onAdd={openModal} />
+                <OptionChain
+                  indexId={selectedIndex}
+                  onAdd={openModal}
+                  onSpotUpdate={setSpotPrice}
+                />
               )}
             </div>
 
