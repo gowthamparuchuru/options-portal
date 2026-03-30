@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import calendar as _calendar
 import json
 import logging
 import tempfile
+import threading
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from threading import Lock
@@ -14,6 +14,7 @@ import pyotp
 from kiteconnect.exceptions import TokenException
 
 from .kiteconnect_wrapper import Zerodha
+from .expiry_utils import is_monthly_expiry
 from .interface import ProductType, OrderType, TransactionType
 
 log = logging.getLogger("zerodha")
@@ -62,14 +63,6 @@ KITE_INDEX_TOKENS = {
 }
 
 
-def _is_monthly_expiry(d: date) -> bool:
-    """Check if the given date is the last Thursday of its month."""
-    last_day = _calendar.monthrange(d.year, d.month)[1]
-    last_date = date(d.year, d.month, last_day)
-    offset = (last_date.weekday() - 3) % 7  # Thursday = weekday 3
-    last_thursday = last_date - timedelta(days=offset)
-    return d == last_thursday
-
 
 def _format_strike(strike: float) -> str:
     if strike == int(strike):
@@ -92,6 +85,7 @@ class ZerodhaBroker:
         self._ticker_tokens: list[int] = []
         self._kite_prices: dict[int, float] = {}
         self._price_lock = Lock()
+        self._relogin_in_progress = False
 
     # ── Auth ──────────────────────────────────────────────────────
 
@@ -161,7 +155,7 @@ class ZerodhaBroker:
         yy = f"{expiry.year % 100:02d}"
         strike_str = _format_strike(strike)
 
-        if _is_monthly_expiry(expiry):
+        if is_monthly_expiry(expiry, index_name):
             mon = MONTH_ABBR[expiry.month]
             return f"{prefix}{yy}{mon}{strike_str}{option_type}"
         else:
@@ -298,14 +292,20 @@ class ZerodhaBroker:
 
             def on_error(ws, code, reason):
                 log.error("Kite ticker error: code=%s reason=%s", code, reason)
+                if "400" in str(reason) or "BadRequest" in str(reason):
+                    threading.Thread(
+                        target=self._relogin_and_relaunch, daemon=True
+                    ).start()
 
             ticker.on_ticks = on_ticks
             ticker.on_connect = on_connect
             ticker.on_close = on_close
             ticker.on_error = on_error
 
-            ticker.connect(threaded=True, reconnect=True,
-                           reconnect_max_tries=50, reconnect_max_delay=30)
+            ticker.reconnect = True
+            ticker.reconnect_max_tries = 50
+            ticker.reconnect_max_delay = 30
+            ticker.connect(threaded=True)
             self._ticker = ticker
             log.info("Kite ticker started")
         except Exception:
@@ -318,6 +318,19 @@ class ZerodhaBroker:
             except Exception:
                 pass
             self._ticker = None
+
+    def _relogin_and_relaunch(self):
+        if self._relogin_in_progress:
+            return
+        self._relogin_in_progress = True
+        try:
+            log.info("Ticker auth error — re-logging in and reconnecting")
+            if self._fresh_login():
+                self._launch_ticker()
+            else:
+                log.error("Re-login failed — ticker will not reconnect")
+        finally:
+            self._relogin_in_progress = False
 
     def get_kite_ltp(self, index_id: str) -> float | None:
         token = KITE_INDEX_TOKENS.get(index_id)

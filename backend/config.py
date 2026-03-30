@@ -20,23 +20,13 @@ ZERODHA_ENV_VARS = [
 
 
 def load_config() -> dict:
-    """Load broker credentials from .env in sibling shoonya-script folder or project root."""
-    candidates = [
-        Path(__file__).resolve().parent.parent / ".env",
-        Path(__file__).resolve().parent.parent.parent / "shoonya-script" / ".env",
-    ]
+    """Load broker credentials from .env in project root."""
+    env_path = Path(__file__).resolve().parent.parent / ".env"
 
-    loaded = False
-    for p in candidates:
-        if p.exists():
-            load_dotenv(p)
-            loaded = True
-            break
+    if not env_path.exists():
+        raise RuntimeError(".env not found. Place it in the project root.")
 
-    if not loaded:
-        raise RuntimeError(
-            ".env not found. Place it in project root or ensure ../shoonya-script/.env exists."
-        )
+    load_dotenv(env_path)
 
     config = {}
     missing = []
