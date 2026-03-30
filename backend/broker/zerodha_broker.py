@@ -1,14 +1,13 @@
-"""Zerodha broker for margin calculation, charting, and live Kite ticker."""
+"""Zerodha broker for margin calculation and historical charting."""
 
 from __future__ import annotations
 
+import calendar as _calendar
 import json
 import logging
 import tempfile
-import threading
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from threading import Lock
 
 import pyotp
 from kiteconnect.exceptions import TokenException
@@ -58,8 +57,6 @@ SYMBOL_PREFIX = {
 KITE_INDEX_TOKENS = {
     "NIFTY": 256265,
     "SENSEX": 265,
-    "INDIAVIX": 264969,
-    "GIFTNIFTY": 291849,
 }
 
 
@@ -81,11 +78,6 @@ class ZerodhaBroker:
         self._cfg = config
         self._kite: Zerodha | None = None
         self._logged_in = False
-        self._ticker = None
-        self._ticker_tokens: list[int] = []
-        self._kite_prices: dict[int, float] = {}
-        self._price_lock = Lock()
-        self._relogin_in_progress = False
 
     # ── Auth ──────────────────────────────────────────────────────
 
@@ -257,95 +249,6 @@ class ZerodhaBroker:
         except Exception:
             log.exception("Failed to fetch historical candles for %s", index_id)
             return []
-
-    # ── Kite live ticker ────────────────────────────────────────
-
-    def start_kite_ticker(self, tokens: list[int]):
-        if not self._kite:
-            return
-        self._ticker_tokens = tokens
-        self._launch_ticker()
-
-    def _launch_ticker(self):
-        try:
-            if self._ticker:
-                try:
-                    self._ticker.close()
-                except Exception:
-                    pass
-
-            ticker = self._kite.ticker()
-            tokens = self._ticker_tokens
-
-            def on_ticks(ws, ticks):
-                with self._price_lock:
-                    for t in ticks:
-                        self._kite_prices[t["instrument_token"]] = t["last_price"]
-
-            def on_connect(ws, response):
-                ws.subscribe(tokens)
-                ws.set_mode(ws.MODE_LTP, tokens)
-                log.info("Kite ticker connected — subscribed to %d tokens", len(tokens))
-
-            def on_close(ws, code, reason):
-                log.warning("Kite ticker closed: code=%s reason=%s", code, reason)
-
-            def on_error(ws, code, reason):
-                log.error("Kite ticker error: code=%s reason=%s", code, reason)
-                if "400" in str(reason) or "BadRequest" in str(reason):
-                    threading.Thread(
-                        target=self._relogin_and_relaunch, daemon=True
-                    ).start()
-
-            ticker.on_ticks = on_ticks
-            ticker.on_connect = on_connect
-            ticker.on_close = on_close
-            ticker.on_error = on_error
-
-            ticker.reconnect = True
-            ticker.reconnect_max_tries = 50
-            ticker.reconnect_max_delay = 30
-            ticker.connect(threaded=True)
-            self._ticker = ticker
-            log.info("Kite ticker started")
-        except Exception:
-            log.exception("Failed to start Kite ticker")
-
-    def stop_kite_ticker(self):
-        if self._ticker:
-            try:
-                self._ticker.close()
-            except Exception:
-                pass
-            self._ticker = None
-
-    def _relogin_and_relaunch(self):
-        if self._relogin_in_progress:
-            return
-        self._relogin_in_progress = True
-        try:
-            log.info("Ticker auth error — re-logging in and reconnecting")
-            if self._fresh_login():
-                self._launch_ticker()
-            else:
-                log.error("Re-login failed — ticker will not reconnect")
-        finally:
-            self._relogin_in_progress = False
-
-    def get_kite_ltp(self, index_id: str) -> float | None:
-        token = KITE_INDEX_TOKENS.get(index_id)
-        if token is None:
-            return None
-        with self._price_lock:
-            return self._kite_prices.get(token)
-
-    def kite_price_snapshot(self) -> dict[str, float]:
-        with self._price_lock:
-            out = {}
-            for key, token in KITE_INDEX_TOKENS.items():
-                if token in self._kite_prices:
-                    out[key] = self._kite_prices[token]
-            return out
 
     # ── Session cache ────────────────────────────────────────────
 

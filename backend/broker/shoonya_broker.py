@@ -118,9 +118,12 @@ class ShoonyaBroker(BrokerInterface):
                 password=self._cfg["SHOONYA_PASSWORD"],
                 usertoken=cached,
             )
-            self._logged_in = True
-            log.info("Using cached session")
-            return {"ok": True, "msg": "Using cached session"}
+            test = self._api.get_quotes(exchange="NSE", token="26000")
+            if test and test.get("stat") == "Ok":
+                self._logged_in = True
+                log.info("Using cached session")
+                return {"ok": True, "msg": "Using cached session"}
+            log.warning("Cached session expired, doing fresh login")
 
         totp = pyotp.TOTP(self._cfg["SHOONYA_TOTP_SECRET"]).now()
         log.info("Generated TOTP, attempting login")
@@ -149,6 +152,23 @@ class ShoonyaBroker(BrokerInterface):
     def is_logged_in(self) -> bool:
         return self._logged_in
 
+    # ── Funds ──────────────────────────────────────────────────────
+
+    def get_available_margin(self) -> dict | None:
+        resp = self._api.get_limits()
+        if not resp or resp.get("stat") != "Ok":
+            log.warning("get_limits failed: %s", resp)
+            return None
+        collateral = float(resp.get("collateral", 0))
+        cash = float(resp.get("cash", 0))
+        margin_used = float(resp.get("marginused", 0))
+        return {
+            "collateral": round(collateral, 2),
+            "cash": round(cash, 2),
+            "margin_used": round(margin_used, 2),
+            "available": round(collateral + cash - margin_used, 2),
+        }
+
     # ── Market data ───────────────────────────────────────────────
 
     def get_spot_price(self, exchange: str, token: str) -> float | None:
@@ -156,6 +176,7 @@ class ShoonyaBroker(BrokerInterface):
         if resp and resp.get("stat") == "Ok":
             ltp = float(resp.get("lp", 0))
             return ltp if ltp > 0 else None
+        log.warning("get_spot_price failed for %s|%s: %s", exchange, token, resp)
         return None
 
     def get_ltp(self, exchange: str, token: str) -> float | None:

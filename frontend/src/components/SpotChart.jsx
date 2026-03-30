@@ -7,8 +7,6 @@ const CANDLE_INTERVAL_SEC = 15 * 60;
 const DISPLAY_NAMES = {
   NIFTY: "NIFTY 50",
   SENSEX: "SENSEX",
-  INDIAVIX: "INDIA VIX",
-  GIFTNIFTY: "GIFT NIFTY",
 };
 
 function candleStartIST() {
@@ -16,7 +14,7 @@ function candleStartIST() {
   return nowFakeUtc - (nowFakeUtc % CANDLE_INTERVAL_SEC);
 }
 
-export default function SpotChart({ indexId, spotPrice, liveEndpoint }) {
+export default function SpotChart({ indexId, spotPrice }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
   const seriesRef = useRef(null);
@@ -25,25 +23,8 @@ export default function SpotChart({ indexId, spotPrice, liveEndpoint }) {
   const [error, setError] = useState(null);
   const [prevClose, setPrevClose] = useState(null);
   const [lastClose, setLastClose] = useState(null);
-  const [wsPrice, setWsPrice] = useState(null);
 
-  // Optional: connect to a backend WS for live prices (Kite ticker)
-  useEffect(() => {
-    if (!liveEndpoint || !indexId) return;
-    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${proto}//${window.location.host}${liveEndpoint}`;
-    const ws = new WebSocket(url);
-    ws.onmessage = (e) => {
-      const msg = JSON.parse(e.data);
-      if (msg.type === "tick" && msg.prices[indexId] != null) {
-        setWsPrice(msg.prices[indexId]);
-      }
-    };
-    ws.onerror = () => {};
-    return () => ws.close();
-  }, [liveEndpoint, indexId]);
-
-  const livePrice = spotPrice || wsPrice;
+  const livePrice = spotPrice;
 
   // Create chart and load historical candles
   useEffect(() => {

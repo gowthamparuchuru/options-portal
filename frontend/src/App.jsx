@@ -18,19 +18,31 @@ export default function App() {
   const [showConfirm, setShowConfirm] = useState(false);
   const [spotPrice, setSpotPrice] = useState(null);
   const [execId, setExecId] = useState(null);
+  const [funds, setFunds] = useState(null);
   const [margin, setMargin] = useState({
     total_margin: 0, span: 0, exposure: 0,
     margin_benefit: 0, option_premium: 0,
+    available: null,
     loading: false, error: null,
   });
   const marginTimer = useRef(null);
 
+  const fetchFunds = useCallback(() => {
+    fetch("/api/orders/funds")
+      .then((r) => r.json())
+      .then((d) => { if (d.available != null) setFunds(d); })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     fetch("/api/auth/status")
       .then((r) => r.json())
-      .then((d) => setAuth({ checked: true, ok: d.authenticated, error: d.error }))
+      .then((d) => {
+        setAuth({ checked: true, ok: d.authenticated, error: d.error });
+        if (d.authenticated) fetchFunds();
+      })
       .catch((e) => setAuth({ checked: true, ok: false, error: e.message }));
-  }, []);
+  }, [fetchFunds]);
 
   const openModal = useCallback((strike) => setModal(strike), []);
 
@@ -79,12 +91,17 @@ export default function App() {
           expiry: item.expiry,
         }));
 
-        const res = await fetch("/api/orders/margin", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ orders: marginOrders }),
-        });
-        const data = await res.json();
+        const [marginRes, fundsRes] = await Promise.all([
+          fetch("/api/orders/margin", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ orders: marginOrders }),
+          }),
+          fetch("/api/orders/funds"),
+        ]);
+        const data = await marginRes.json();
+        const fundsData = await fundsRes.json();
+        if (fundsData.available != null) setFunds(fundsData);
 
         if (data.error) {
           setMargin((m) => ({ ...m, loading: false, error: data.error }));
@@ -95,6 +112,7 @@ export default function App() {
             exposure: data.exposure || 0,
             margin_benefit: data.margin_benefit || 0,
             option_premium: data.option_premium || 0,
+            available: fundsData.available ?? null,
             loading: false,
             error: null,
           });
@@ -147,6 +165,14 @@ export default function App() {
             >
               Show Option Chain
             </button>
+            {funds && (
+              <div className="funds-badge">
+                <span className="funds-label">Available Margin</span>
+                <span className="funds-value">
+                  {Number(funds.available).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="content-grid">
@@ -154,8 +180,6 @@ export default function App() {
               {chainActive && selectedIndex && (
                 <SpotChart indexId={selectedIndex} spotPrice={spotPrice} />
               )}
-              <SpotChart indexId="GIFTNIFTY" liveEndpoint="/api/options/kite-ws" />
-              <SpotChart indexId="INDIAVIX" liveEndpoint="/api/options/kite-ws" />
             </div>
 
             <div className="chain-panel">

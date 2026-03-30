@@ -10,8 +10,6 @@ import pandas as pd
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from ..broker.shoonya_broker import ShoonyaBroker
-from ..broker.zerodha_broker import KITE_INDEX_TOKENS
-
 router = APIRouter()
 log = logging.getLogger("options")
 
@@ -38,12 +36,13 @@ async def get_candles(index_id: str, request: Request):
     if margin_broker is None:
         return {"error": "Zerodha not configured — chart unavailable"}
 
-    if index_id not in KITE_INDEX_TOKENS:
+    SUPPORTED = {"NIFTY", "SENSEX"}
+    if index_id not in SUPPORTED:
         return {"error": f"Unknown index: {index_id}"}
 
     now = datetime.now()
     prev_day = _previous_trading_day(now.date())
-    market_open = dtime(hour=6, minute=0) if index_id == "GIFTNIFTY" else dtime(hour=9, minute=15)
+    market_open = dtime(hour=9, minute=15)
     from_dt = datetime.combine(prev_day, market_open)
     to_dt = now
 
@@ -68,27 +67,6 @@ async def get_candles(index_id: str, request: Request):
         "interval": "15minute",
         "prev_close": prev_close,
     }
-
-
-@router.websocket("/kite-ws")
-async def kite_live_ws(ws: WebSocket):
-    """Stream live prices from Kite ticker to browser clients."""
-    await ws.accept()
-    margin_broker = ws.app.state.margin_broker
-    if not margin_broker:
-        await ws.send_json({"type": "error", "message": "Zerodha not configured"})
-        await ws.close()
-        return
-    try:
-        while True:
-            prices = margin_broker.kite_price_snapshot()
-            if prices:
-                await ws.send_json({"type": "tick", "prices": prices})
-            await asyncio.sleep(1)
-    except WebSocketDisconnect:
-        pass
-    except Exception:
-        log.exception("Kite WS error")
 
 
 @router.get("/chain/{index_id}")

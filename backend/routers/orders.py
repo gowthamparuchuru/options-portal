@@ -138,6 +138,17 @@ async def _smart_sell_one(broker: ShoonyaBroker, item: BasketItem, statuses: dic
         statuses[sym]["error"] = "Not filled after all attempts"
 
 
+@router.get("/funds")
+async def get_funds(request: Request):
+    broker: ShoonyaBroker = request.app.state.broker
+    if not broker.is_logged_in():
+        return {"error": "Not authenticated"}
+    result = broker.get_available_margin()
+    if result is None:
+        return {"error": "Failed to fetch funds"}
+    return result
+
+
 @router.post("/margin", response_model=MarginResponse)
 async def calculate_basket_margin(req: MarginRequest, request: Request):
     margin_broker: ZerodhaBroker | None = request.app.state.margin_broker

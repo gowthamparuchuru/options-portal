@@ -63,6 +63,12 @@ export default function Basket({ items, onRemove, onEdit, onExecute, disabled, m
             <div className="margin-error">{margin.error}</div>
           ) : margin.total_margin > 0 ? (
             <>
+              {margin.available != null && (
+                <div className="margin-row margin-available">
+                  <span>Available Margin</span>
+                  <span>{fmt(margin.available)}</span>
+                </div>
+              )}
               <div className="margin-row margin-total">
                 <span>Required Margin</span>
                 <span>{fmt(margin.total_margin)}</span>
