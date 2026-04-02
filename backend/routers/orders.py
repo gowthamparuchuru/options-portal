@@ -17,9 +17,11 @@ log = logging.getLogger("orders")
 async def execute_basket(req: ExecuteBasketRequest, request: Request):
     broker: ShoonyaBroker = request.app.state.broker
     if not broker.is_logged_in():
+        log.warning("Execute basket rejected — broker not authenticated")
         return {"error": "Not authenticated"}
 
     exec_id = str(uuid.uuid4())[:8]
+    log.info("Basket execution started — exec_id=%s orders=%d", exec_id, len(req.orders))
     statuses = {}
 
     for item in req.orders:
@@ -49,6 +51,8 @@ async def execute_basket(req: ExecuteBasketRequest, request: Request):
     ]
     asyncio.create_task(_await_all(tasks))
 
+    log.info("Basket execution queued — exec_id=%s symbols=%s",
+             exec_id, [item.symbol for item in req.orders])
     return {"execution_id": exec_id, "count": len(req.orders)}
 
 
@@ -67,12 +71,16 @@ async def _smart_sell_one(broker: ShoonyaBroker, item: BasketItem, statuses: dic
     qty = item.lots * item.lot_size
     exchange = item.exchange
 
+    log.info("Smart sell starting — symbol=%s qty=%d exchange=%s", sym, qty, exchange)
+
     ltp = broker.get_ltp(exchange, item.token)
     if ltp is None:
+        log.error("Could not fetch LTP for %s — aborting", sym)
         statuses[sym]["status"] = "FAILED"
         statuses[sym]["error"] = "Could not fetch LTP"
         return
 
+    log.debug("Initial LTP for %s = %.2f", sym, ltp)
     order_id = None
     filled = False
 
@@ -86,6 +94,7 @@ async def _smart_sell_one(broker: ShoonyaBroker, item: BasketItem, statuses: dic
         if filled:
             break
 
+        log.info("Entering phase '%s' for %s", phase["name"], sym)
         statuses[sym]["phase"] = phase["name"]
 
         for attempt in range(1, phase["retries"] + 1):
@@ -97,24 +106,30 @@ async def _smart_sell_one(broker: ShoonyaBroker, item: BasketItem, statuses: dic
             statuses[sym]["attempt"] = attempt
             statuses[sym]["price"] = price
 
+            log.debug("%s phase=%s attempt=%d/%d ltp=%.2f price=%.2f",
+                      sym, phase["name"], attempt, phase["retries"], ltp, price)
+
             if order_id is None:
                 res = broker.place_sell_order(exchange, item.token, sym, qty, price)
                 if res["status"] == "FAILED":
                     statuses[sym]["status"] = "FAILED"
                     statuses[sym]["error"] = res.get("error", "Place failed")
-                    log.error("SELL failed %s: %s", sym, res.get("error"))
+                    log.error("SELL failed for %s: %s", sym, res.get("error"))
                     filled = True
                     break
                 order_id = res["order_id"]
                 statuses[sym]["order_id"] = order_id
                 statuses[sym]["status"] = "PLACED"
+                log.info("Order placed for %s — order_id=%s price=%.2f", sym, order_id, price)
             else:
+                log.debug("Modifying order %s for %s to price=%.2f", order_id, sym, price)
                 broker.modify_order_price(order_id, exchange, sym, qty, price)
 
             await asyncio.sleep(phase["wait"])
 
             ost = broker.get_order_status(order_id)
             if ost is None:
+                log.debug("No status returned for order %s, retrying", order_id)
                 continue
 
             statuses[sym]["status"] = ost["status"].upper()
@@ -123,17 +138,22 @@ async def _smart_sell_one(broker: ShoonyaBroker, item: BasketItem, statuses: dic
             if ost["status"].upper() in ("COMPLETE", "FILLED"):
                 statuses[sym]["status"] = "FILLED"
                 statuses[sym]["avg_price"] = ost["avg_price"]
-                log.info("FILLED %s @ %.2f", sym, ost["avg_price"])
+                log.info("Order FILLED — symbol=%s order_id=%s avg_price=%.2f",
+                         sym, order_id, ost["avg_price"])
                 filled = True
                 break
 
             if ost["status"].upper() in ("REJECTED", "CANCELLED", "CANCELED"):
+                reason = ost.get("rejection_reason", "Rejected")
                 statuses[sym]["status"] = "FAILED"
-                statuses[sym]["error"] = ost.get("rejection_reason", "Rejected")
+                statuses[sym]["error"] = reason
+                log.error("Order %s for %s was %s: %s",
+                          order_id, sym, ost["status"].upper(), reason)
                 filled = True
                 break
 
     if not filled:
+        log.warning("Order not filled after all phases — symbol=%s order_id=%s", sym, order_id)
         statuses[sym]["status"] = "PENDING"
         statuses[sym]["error"] = "Not filled after all attempts"
 
@@ -153,11 +173,14 @@ async def get_funds(request: Request):
 async def calculate_basket_margin(req: MarginRequest, request: Request):
     margin_broker: ZerodhaBroker | None = request.app.state.margin_broker
     if margin_broker is None:
+        log.debug("Margin calculation requested but Zerodha not configured")
         return MarginResponse(error="Margin calculation not available (Zerodha not configured)")
 
     if not margin_broker.is_logged_in():
+        log.info("Zerodha not logged in, attempting login before margin calculation")
         result = margin_broker.login()
         if not result.get("ok"):
+            log.error("Zerodha login failed during margin request: %s", result.get("error"))
             return MarginResponse(error=f"Zerodha login failed: {result.get('error')}")
 
     kite_orders = []
@@ -177,7 +200,14 @@ async def calculate_basket_margin(req: MarginRequest, request: Request):
             "quantity": item.lots * item.lot_size,
         })
 
+    log.debug("Calculating basket margin for %d orders", len(kite_orders))
     result = margin_broker.get_basket_margin(kite_orders)
+    if result.get("error"):
+        log.error("Margin calculation failed: %s", result["error"])
+    else:
+        log.debug("Margin result — total=%.2f span=%.2f exposure=%.2f benefit=%.2f",
+                  result.get("total_margin", 0), result.get("span", 0),
+                  result.get("exposure", 0), result.get("margin_benefit", 0))
     return MarginResponse(**result)
 
 

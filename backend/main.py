@@ -14,10 +14,13 @@ from .routers import auth, options, orders
 from .routers.options import _feed, run_orphan_watcher
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s [%(name)s] %(levelname)s  %(message)s",
     datefmt="%H:%M:%S",
 )
+# Keep noisy third-party libs at WARNING to avoid flooding the log
+for _lib in ("urllib3", "httpx", "websockets", "asyncio", "playwright"):
+    logging.getLogger(_lib).setLevel(logging.WARNING)
 log = logging.getLogger("app")
 
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"

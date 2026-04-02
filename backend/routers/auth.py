@@ -21,13 +21,16 @@ def _login_response(result: dict) -> JSONResponse:
 async def auth_status(request: Request):
     broker = request.app.state.broker
     if broker.is_logged_in():
+        log.debug("Auth status check — already logged in")
         body = AuthStatus(authenticated=True, message="Already logged in")
         return JSONResponse(content=body.model_dump(), status_code=200)
 
+    log.info("Auth status check — not logged in, triggering login")
     return _login_response(broker.login())
 
 
 @router.post("/login")
 async def force_login(request: Request):
     broker = request.app.state.broker
+    log.info("Manual login requested")
     return _login_response(broker.login())

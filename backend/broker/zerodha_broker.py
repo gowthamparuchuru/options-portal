@@ -83,10 +83,13 @@ class ZerodhaBroker:
 
     def _fresh_login(self) -> bool:
         """Do a fresh TOTP-based login. Returns True on success."""
+        user_id = self._cfg["ZERODHA_USER_ID"]
+        log.info("Attempting fresh Zerodha login for user: %s", user_id)
         try:
+            log.debug("Generating TOTP for Zerodha login")
             totp = pyotp.TOTP(self._cfg["ZERODHA_TOTP_SECRET"]).now()
             kite = Zerodha(
-                user_id=self._cfg["ZERODHA_USER_ID"],
+                user_id=user_id,
                 password=self._cfg["ZERODHA_PASSWORD"],
                 twofa=totp,
             )
@@ -94,26 +97,29 @@ class ZerodhaBroker:
             self._kite = kite
             self._logged_in = True
             self._save_session_cache(kite)
-            log.info("Zerodha fresh login successful")
+            log.info("Zerodha fresh login successful for user: %s", user_id)
             return True
         except Exception:
-            log.exception("Zerodha fresh login failed")
+            log.exception("Zerodha fresh login failed for user: %s", user_id)
             return False
 
     def login(self) -> dict:
+        user_id = self._cfg["ZERODHA_USER_ID"]
+        log.info("Zerodha login attempt for user: %s", user_id)
         cached = self._load_cached_session()
         if cached:
+            log.debug("Found cached Zerodha session, restoring for %s", user_id)
             try:
-                kite = Zerodha(user_id=self._cfg["ZERODHA_USER_ID"])
+                kite = Zerodha(user_id=user_id)
                 kite.reqsession = cached["session"]
                 kite.enc_token = cached["enc_token"]
-                kite.user_id = self._cfg["ZERODHA_USER_ID"]
+                kite.user_id = user_id
                 self._kite = kite
                 self._logged_in = True
-                log.info("Using cached Zerodha session")
+                log.info("Zerodha login successful (cached session) for user: %s", user_id)
                 return {"ok": True, "msg": "Using cached session"}
             except Exception:
-                log.warning("Cached session invalid, doing fresh login")
+                log.warning("Cached Zerodha session invalid for %s — falling back to fresh login", user_id)
 
         if self._fresh_login():
             return {"ok": True, "msg": "Login successful"}
@@ -175,7 +181,11 @@ class ZerodhaBroker:
         Returns: {total_margin, span, exposure, margin_benefit, option_premium, error}
         """
         if not self._kite:
+            log.error("get_basket_margin called but Zerodha not logged in")
             return {"error": "Zerodha not logged in"}
+
+        log.debug("Calculating basket margin for %d orders: %s",
+                  len(orders), [o.get("tradingsymbol") for o in orders])
 
         params = []
         for o in orders:
@@ -201,7 +211,7 @@ class ZerodhaBroker:
             combined_total = final.get("total", 0)
             benefit = individual_total - combined_total
 
-            return {
+            result = {
                 "total_margin": round(combined_total, 2),
                 "span": round(final.get("span", 0), 2),
                 "exposure": round(final.get("exposure", 0), 2),
@@ -209,6 +219,9 @@ class ZerodhaBroker:
                 "option_premium": round(final.get("option_premium", 0), 2),
                 "error": None,
             }
+            log.debug("Basket margin result — total=%.2f span=%.2f exposure=%.2f benefit=%.2f",
+                      result["total_margin"], result["span"], result["exposure"], result["margin_benefit"])
+            return result
         except Exception as e:
             log.exception("Margin calculation failed")
             return {"error": str(e)}
@@ -219,10 +232,14 @@ class ZerodhaBroker:
         self, index_id: str, from_date: datetime, to_date: datetime,
         interval: str = "15minute",
     ) -> list[dict]:
+        log.debug("Fetching historical candles — index=%s interval=%s from=%s to=%s",
+                  index_id, interval, from_date, to_date)
         if not self._kite:
+            log.debug("Zerodha not logged in, cannot fetch candles")
             return []
         token = KITE_INDEX_TOKENS.get(index_id)
         if not token:
+            log.warning("Unknown index for candles: %s", index_id)
             return []
         try:
             def _call():
@@ -245,6 +262,7 @@ class ZerodhaBroker:
                     "low": c["low"],
                     "close": c["close"],
                 })
+            log.debug("Fetched %d candles for %s", len(candles), index_id)
             return candles
         except Exception:
             log.exception("Failed to fetch historical candles for %s", index_id)
@@ -253,17 +271,21 @@ class ZerodhaBroker:
     # ── Session cache ────────────────────────────────────────────
 
     def _load_cached_session(self) -> dict | None:
+        log.debug("Checking Zerodha session cache at: %s", SESSION_CACHE)
         if not SESSION_CACHE.exists():
+            log.debug("No Zerodha session cache file found")
             return None
         try:
             data = json.loads(SESSION_CACHE.read_text())
             if data.get("date") != str(date.today()):
+                log.debug("Zerodha session cache is stale (date=%s), ignoring", data.get("date"))
                 return None
             import pickle, base64
             session = pickle.loads(base64.b64decode(data["session_pickle"]))
+            log.debug("Valid Zerodha session cache found for today")
             return {"session": session, "enc_token": data["enc_token"]}
         except Exception:
-            log.warning("Failed to load cached Zerodha session")
+            log.warning("Failed to load cached Zerodha session from %s", SESSION_CACHE)
             return None
 
     def _save_session_cache(self, kite: Zerodha):
