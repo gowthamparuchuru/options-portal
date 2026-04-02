@@ -5,3 +5,6 @@ dist/
 dumps/
 __pycache__/
 nohup.out
+.idea/
+.idea/**
+.idea/*

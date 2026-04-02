@@ -18,9 +18,9 @@ export default function LoginStatus({ auth }) {
   }
 
   return (
-    <div className="auth-badge">
+    <div className="auth-badge" title={auth.error || "Login failed"}>
       <span className="auth-dot fail" />
-      Disconnected
+      Broker Disconnected
     </div>
   );
 }

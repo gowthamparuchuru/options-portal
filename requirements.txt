@@ -11,3 +11,4 @@ NorenRestApiPy
 kiteconnect
 Click
 six
+playwright

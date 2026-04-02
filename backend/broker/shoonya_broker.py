@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import tempfile
+import urllib.parse
 import zipfile
 from datetime import date, datetime
 from pathlib import Path
@@ -11,8 +13,13 @@ from typing import Callable
 import pyotp
 import requests
 from NorenRestApiPy.NorenApi import NorenApi
+from playwright.sync_api import sync_playwright
 
 from .interface import BrokerInterface, ProductType, OrderType, TransactionType
+
+OAUTH_LOGIN_URL = "https://trade.shoonya.com/OAuthlogin/authorize/oauth?client_id={client_id}_U"
+OAUTH_REDIRECT_PREFIX = "https://trade.shoonya.com/OAuthlogin"
+GEN_TOKEN_URL = "https://api.shoonya.com/NorenWClientAPI/GenAcsTok"
 
 MONTH_ABBR = {
     1: "JAN", 2: "FEB", 3: "MAR", 4: "APR", 5: "MAY", 6: "JUN",
@@ -125,29 +132,70 @@ class ShoonyaBroker(BrokerInterface):
                 return {"ok": True, "msg": "Using cached session"}
             log.warning("Cached session expired, doing fresh login")
 
-        totp = pyotp.TOTP(self._cfg["SHOONYA_TOTP_SECRET"]).now()
-        log.info("Generated TOTP, attempting login")
+        try:
+            token = self._oauth_login()
+        except Exception as exc:
+            log.error("OAuth login failed: %s", exc)
+            return {"ok": False, "error": str(exc)}
 
-        resp = self._api.login(
+        self._api.set_session(
             userid=self._cfg["SHOONYA_USER_ID"],
             password=self._cfg["SHOONYA_PASSWORD"],
-            twoFA=totp,
-            vendor_code=self._cfg["SHOONYA_VENDOR_CODE"],
-            api_secret=self._cfg["SHOONYA_API_SECRET"],
-            imei=self._cfg["SHOONYA_IMEI"],
+            usertoken=token,
         )
-
-        if resp is None or resp.get("stat") != "Ok":
-            err = resp.get("emsg", "Unknown error") if resp else "No response from broker"
-            log.error("Login failed: %s", err)
-            return {"ok": False, "error": err}
-
-        token = resp.get("susertoken")
-        if token:
-            self._save_session_cache(token)
+        self._save_session_cache(token)
         self._logged_in = True
         log.info("Login successful")
         return {"ok": True, "msg": "Login successful"}
+
+    def _oauth_login(self) -> str:
+        user_id = self._cfg["SHOONYA_USER_ID"]
+        password = self._cfg["SHOONYA_PASSWORD"]
+        totp_secret = self._cfg["SHOONYA_TOTP_SECRET"]
+        oauth_secret = self._cfg["SHOONYA_OAUTH_SECRET"]
+
+        # Step 1-3: Browser automation to obtain OAuth code
+        login_url = OAUTH_LOGIN_URL.format(client_id=user_id)
+        log.info("Starting OAuth browser login: %s", login_url)
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(login_url)
+            page.wait_for_load_state("networkidle")
+
+            page.fill("#lgnusrid", user_id)
+            page.fill("#lgnpwd", password)
+
+            totp = pyotp.TOTP(totp_secret).now()
+            log.info("Generated TOTP for OAuth login")
+            page.fill("#lgnotp", totp)
+
+            page.click(".lgnBtnClss")
+            page.wait_for_url(f"{OAUTH_REDIRECT_PREFIX}**code=**", timeout=30000)
+
+            redirect_url = page.url
+            browser.close()
+
+        log.info("OAuth redirect captured: %s", redirect_url)
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(redirect_url).query)
+        code = params.get("code", [None])[0]
+        if not code:
+            raise RuntimeError(f"Could not extract code from redirect URL: {redirect_url}")
+
+        # Step 4: Exchange code for access token
+        checksum = hashlib.sha256(f"{user_id}_U{oauth_secret}{code}".encode()).hexdigest()
+        payload = f"jData={json.dumps({'code': code, 'checksum': checksum})}"
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
+        resp = requests.post(GEN_TOKEN_URL, headers=headers, data=payload, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get("stat") != "Ok":
+            raise RuntimeError(f"Token exchange failed: {data.get('emsg', data)}")
+
+        return data["access_token"]
 
     def is_logged_in(self) -> bool:
         return self._logged_in

@@ -36,12 +36,19 @@ export default function App() {
 
   useEffect(() => {
     fetch("/api/auth/status")
-      .then((r) => r.json())
-      .then((d) => {
-        setAuth({ checked: true, ok: d.authenticated, error: d.error });
-        if (d.authenticated) fetchFunds();
+      .then(async (r) => {
+        const d = await r.json();
+        if (r.ok && d.authenticated) {
+          setAuth({ checked: true, ok: true, error: null });
+          fetchFunds();
+        } else {
+          const reason = d.error || `Broker responded with HTTP ${r.status}`;
+          setAuth({ checked: true, ok: false, error: reason });
+        }
       })
-      .catch((e) => setAuth({ checked: true, ok: false, error: e.message }));
+      .catch((e) =>
+        setAuth({ checked: true, ok: false, error: `Network error: ${e.message}` })
+      );
   }, [fetchFunds]);
 
   const openModal = useCallback((strike) => setModal(strike), []);
@@ -150,7 +157,8 @@ export default function App() {
 
       {auth.checked && !auth.ok && (
         <div className="error-banner">
-          Login failed: {auth.error || "Unknown error"}. Trading features disabled.
+          Shoonya broker login failed: {auth.error || "Unknown error"}. Trading
+          features disabled.
         </div>
       )}
 
