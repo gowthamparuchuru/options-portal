@@ -10,6 +10,8 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Callable
 
+import concurrent.futures
+
 import pyotp
 import requests
 from NorenRestApiPy.NorenApi import NorenApi
@@ -158,24 +160,29 @@ class ShoonyaBroker(BrokerInterface):
         login_url = OAUTH_LOGIN_URL.format(client_id=user_id)
         log.info("Starting OAuth browser login: %s", login_url)
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.goto(login_url)
-            page.wait_for_load_state("networkidle")
+        def _run_browser() -> str:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page()
+                page.goto(login_url)
+                page.wait_for_load_state("networkidle")
 
-            page.fill("#lgnusrid", user_id)
-            page.fill("#lgnpwd", password)
+                page.fill("#lgnusrid", user_id)
+                page.fill("#lgnpwd", password)
 
-            totp = pyotp.TOTP(totp_secret).now()
-            log.info("Generated TOTP for OAuth login")
-            page.fill("#lgnotp", totp)
+                totp = pyotp.TOTP(totp_secret).now()
+                log.info("Generated TOTP for OAuth login")
+                page.fill("#lgnotp", totp)
 
-            page.click(".lgnBtnClss")
-            page.wait_for_url(f"{OAUTH_REDIRECT_PREFIX}**code=**", timeout=30000)
+                page.click(".lgnBtnClss")
+                page.wait_for_url(f"{OAUTH_REDIRECT_PREFIX}**code=**", timeout=30000)
 
-            redirect_url = page.url
-            browser.close()
+                redirect_url = page.url
+                browser.close()
+            return redirect_url
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            redirect_url = executor.submit(_run_browser).result()
 
         log.info("OAuth redirect captured: %s", redirect_url)
         params = urllib.parse.parse_qs(urllib.parse.urlparse(redirect_url).query)
