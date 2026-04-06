@@ -1,68 +1,34 @@
-import { useState, useEffect } from "react";
-
-function BrokerDot({ ok, loading }) {
+function Dot({ ok, loading }) {
   if (loading) return <span className="auth-dot loading" />;
   return <span className={`auth-dot ${ok ? "ok" : "fail"}`} />;
 }
 
-export default function LoginStatus({ auth }) {
-  const [brokers, setBrokers] = useState(null);
-
-  useEffect(() => {
-    if (!auth.ok) return;
-
-    const check = () => {
-      fetch("/api/auth/broker-status")
-        .then((r) => r.json())
-        .then(setBrokers)
-        .catch(() => {});
-    };
-
-    check();
-    const id = setInterval(check, 60_000);
-    return () => clearInterval(id);
-  }, [auth.ok]);
-
-  if (!auth.checked) {
+export default function LoginStatus({ brokerStatus }) {
+  if (!brokerStatus) {
     return (
       <div className="broker-status-row">
-        <div className="auth-badge">
-          <span className="auth-dot loading" />
-          Connecting...
-        </div>
+        <div className="auth-badge"><Dot loading /> Shoonya</div>
+        <div className="auth-badge"><Dot loading /> Upstox</div>
       </div>
     );
   }
 
-  if (!auth.ok) {
-    return (
-      <div className="broker-status-row">
-        <div className="auth-badge" title={auth.error || "Login failed"}>
-          <span className="auth-dot fail" />
-          Disconnected
-        </div>
-      </div>
-    );
-  }
-
-  const shoonLoading = !brokers;
-  const shoonOk = brokers?.shoonya?.ok ?? false;
-  const upstoxOk = brokers?.upstox?.ok ?? false;
+  const { shoonya, upstox } = brokerStatus;
 
   return (
     <div className="broker-status-row">
       <div
         className="auth-badge"
-        title={shoonOk ? "Shoonya connected" : brokers?.shoonya?.error || "Checking..."}
+        title={shoonya?.ok ? "Shoonya connected" : shoonya?.error || "Disconnected"}
       >
-        <BrokerDot ok={shoonOk} loading={shoonLoading} />
+        <Dot ok={shoonya?.ok} />
         Shoonya
       </div>
       <div
         className="auth-badge"
-        title={upstoxOk ? "Upstox connected" : brokers?.upstox?.error || "Checking..."}
+        title={upstox?.ok ? "Upstox connected" : upstox?.error || "Disconnected"}
       >
-        <BrokerDot ok={upstoxOk} loading={shoonLoading} />
+        <Dot ok={upstox?.ok} />
         Upstox
       </div>
     </div>

@@ -10,7 +10,7 @@ import ConfirmModal from "./components/ConfirmModal";
 import OrderTracker from "./components/OrderTracker";
 
 export default function App() {
-  const [auth, setAuth] = useState({ checked: false, ok: false, error: null });
+  const [brokerStatus, setBrokerStatus] = useState(null);
   const [selectedIndex, setSelectedIndex] = useState(null);
   const [chainActive, setChainActive] = useState(false);
   const [basket, setBasket] = useState([]);
@@ -36,19 +36,17 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetch("/api/auth/status")
-      .then(async (r) => {
-        const d = await r.json();
-        if (r.ok && d.authenticated) {
-          setAuth({ checked: true, ok: true, error: null });
-          fetchFunds();
-        } else {
-          const reason = d.error || `Broker responded with HTTP ${r.status}`;
-          setAuth({ checked: true, ok: false, error: reason });
-        }
+    fetch("/api/auth/broker-status")
+      .then((r) => r.json())
+      .then((d) => {
+        setBrokerStatus(d);
+        if (d.shoonya?.ok) fetchFunds();
       })
-      .catch((e) =>
-        setAuth({ checked: true, ok: false, error: `Network error: ${e.message}` })
+      .catch(() =>
+        setBrokerStatus({
+          shoonya: { ok: false, error: "Network error" },
+          upstox: { ok: false, error: "Network error" },
+        })
       );
   }, [fetchFunds]);
 
@@ -154,17 +152,17 @@ export default function App() {
       <header className="header">
         <h1>Options Portal</h1>
         <LiveClock />
-        <LoginStatus auth={auth} />
+        <LoginStatus brokerStatus={brokerStatus} />
       </header>
 
-      {auth.checked && !auth.ok && (
+      {brokerStatus && !brokerStatus.shoonya?.ok && (
         <div className="error-banner">
-          Shoonya broker login failed: {auth.error || "Unknown error"}. Trading
+          Shoonya broker login failed: {brokerStatus.shoonya?.error || "Unknown error"}. Trading
           features disabled.
         </div>
       )}
 
-      {auth.ok && (
+      {brokerStatus?.shoonya?.ok && (
         <main className="main">
           <div className="controls">
             <IndexSelector value={selectedIndex} onChange={setSelectedIndex} />
