@@ -14,10 +14,25 @@ import concurrent.futures
 
 import pyotp
 import requests
+import NorenRestApiPy.NorenApi as _noren_module
 from NorenRestApiPy.NorenApi import NorenApi
 from playwright.sync_api import sync_playwright
 
 from .interface import BrokerInterface, ProductType, OrderType, TransactionType
+
+
+def _patched_post(url, data=None, **kwargs):
+    """Move jKey from body into Authorization header (new Shoonya REST API requirement)."""
+    if isinstance(data, str) and "&jKey=" in data:
+        body, _, jkey = data.partition("&jKey=")
+        kwargs.setdefault("headers", {})["Authorization"] = f"Bearer {jkey}"
+        data = body
+    return requests._original_post(url, data=data, **kwargs)
+
+
+if not hasattr(requests, "_original_post"):
+    requests._original_post = requests.post
+_noren_module.requests.post = _patched_post
 
 OAUTH_LOGIN_URL = "https://trade.shoonya.com/OAuthlogin/authorize/oauth?client_id={client_id}_U"
 OAUTH_REDIRECT_PREFIX = "https://trade.shoonya.com/OAuthlogin"
@@ -36,7 +51,7 @@ SESSION_CACHE = Path(tempfile.gettempdir()) / ".shoonya_session_cache"
 class _ShoonyaApi(NorenApi):
     def __init__(self):
         super().__init__(
-            host="https://api.shoonya.com/NorenWClientTP/",
+            host="https://api.shoonya.com/NorenWClientAPI",
             websocket="wss://api.shoonya.com/NorenWSTP/",
         )
 
