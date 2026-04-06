@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import LoginStatus from "./components/LoginStatus";
+import LiveClock from "./components/LiveClock";
 import IndexSelector from "./components/IndexSelector";
 import OptionChain from "./components/OptionChain";
 import SpotChart from "./components/SpotChart";
@@ -152,6 +153,7 @@ export default function App() {
     <div className="app">
       <header className="header">
         <h1>Options Portal</h1>
+        <LiveClock />
         <LoginStatus auth={auth} />
       </header>
 

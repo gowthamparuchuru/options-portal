@@ -52,6 +52,17 @@ class UpstoxBroker:
         except Exception:
             return False
 
+    def check_profile(self) -> dict:
+        """Call get_profile to verify connection. Returns {ok, error}."""
+        try:
+            api_instance = upstox_client.UserApi(self._make_api_client())
+            resp = api_instance.get_profile("2.0")
+            if resp and resp.status == "success":
+                return {"ok": True}
+            return {"ok": False, "error": "Profile returned non-success status"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     # ── LTP ──────────────────────────────────────────────────────
 
     def get_ltp(self, instrument_key: str) -> float | None:
