@@ -25,13 +25,6 @@ async def list_indices():
     ]
 
 
-def _previous_trading_day(d) -> "date":
-    d = d - timedelta(days=1)
-    while d.weekday() >= 5:
-        d -= timedelta(days=1)
-    return d
-
-
 @router.get("/candles/{index_id}")
 async def get_candles(index_id: str, request: Request):
     upstox: UpstoxBroker | None = request.app.state.upstox_broker
@@ -42,12 +35,11 @@ async def get_candles(index_id: str, request: Request):
         return {"error": f"Unknown index: {index_id}"}
 
     now = datetime.now()
-    prev_day = _previous_trading_day(now.date())
     market_open = dtime(hour=9, minute=15)
-    from_dt = datetime.combine(prev_day, market_open)
+    from_dt = datetime.combine(now.date() - timedelta(days=5), market_open)
     to_dt = now
 
-    candles = upstox.get_historical_candles(index_id, from_dt, to_dt, "30minute")
+    candles = upstox.get_historical_candles(index_id, from_dt, to_dt, "15minute")
 
     if not candles:
         return {"error": "No candle data available"}
@@ -63,7 +55,7 @@ async def get_candles(index_id: str, request: Request):
     return {
         "candles": candles,
         "index": index_id,
-        "interval": "30minute",
+        "interval": "15minute",
         "prev_close": prev_close,
     }
 

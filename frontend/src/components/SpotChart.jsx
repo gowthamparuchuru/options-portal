@@ -3,11 +3,36 @@ import { createChart, CandlestickSeries } from "lightweight-charts";
 
 const IST_OFFSET_SEC = 5.5 * 3600;
 const CANDLE_INTERVAL_SEC = 15 * 60;
+const DAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 const DISPLAY_NAMES = {
   NIFTY: "NIFTY 50",
   SENSEX: "SENSEX",
 };
+
+function buildDayBreakMarkers(candles) {
+  const markers = [];
+  let prevDay = null;
+  for (const c of candles) {
+    const d = new Date((c.time + IST_OFFSET_SEC) * 1000);
+    const dayKey = d.getUTCDate();
+    if (prevDay !== null && dayKey !== prevDay) {
+      const dd = String(d.getUTCDate()).padStart(2, "0");
+      const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+      const dayName = DAY_LABELS[d.getUTCDay()];
+      markers.push({
+        time: c.time,
+        position: "aboveBar",
+        color: "#8b8fa3",
+        shape: "square",
+        size: 0,
+        text: `${dayName} ${dd}/${mm}`,
+      });
+    }
+    prevDay = dayKey;
+  }
+  return markers;
+}
 
 function candleStartIST() {
   const nowFakeUtc = Math.floor(Date.now() / 1000) + IST_OFFSET_SEC;
@@ -85,6 +110,8 @@ export default function SpotChart({ indexId, spotPrice }) {
           return;
         }
         series.setData(data.candles);
+        const dayMarkers = buildDayBreakMarkers(data.candles);
+        if (dayMarkers.length) series.setMarkers(dayMarkers);
         chart.timeScale().fitContent();
         if (data.candles.length > 0) {
           const last = data.candles[data.candles.length - 1];
