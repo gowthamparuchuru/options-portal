@@ -1,13 +1,14 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import uuid
-from datetime import datetime
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
-from ..models import ExecuteBasketRequest, BasketItem, MarginRequest, MarginResponse
+from ..models import ExecuteBasketRequest, BasketItem, MarginItem, MarginRequest, MarginResponse
 from ..broker.shoonya_broker import ShoonyaBroker
-from ..broker.zerodha_broker import ZerodhaBroker
+from ..broker.upstox_broker import UpstoxBroker
 
 router = APIRouter()
 log = logging.getLogger("orders")
@@ -16,6 +17,8 @@ log = logging.getLogger("orders")
 @router.post("/execute")
 async def execute_basket(req: ExecuteBasketRequest, request: Request):
     broker: ShoonyaBroker = request.app.state.broker
+    upstox: UpstoxBroker | None = request.app.state.upstox_broker
+
     if not broker.is_logged_in():
         log.warning("Execute basket rejected — broker not authenticated")
         return {"error": "Not authenticated"}
@@ -46,7 +49,7 @@ async def execute_basket(req: ExecuteBasketRequest, request: Request):
     request.app.state.active_executions[exec_id] = statuses
 
     tasks = [
-        asyncio.create_task(_smart_sell_one(broker, item, statuses))
+        asyncio.create_task(_smart_sell_one(broker, upstox, item, statuses))
         for item in req.orders
     ]
     asyncio.create_task(_await_all(tasks))
@@ -57,7 +60,6 @@ async def execute_basket(req: ExecuteBasketRequest, request: Request):
 
 
 async def _await_all(tasks):
-    """Wait for all order tasks; log any unexpected errors."""
     for t in asyncio.as_completed(tasks):
         try:
             await t
@@ -65,15 +67,28 @@ async def _await_all(tasks):
             log.exception("Unexpected error in smart sell task")
 
 
-async def _smart_sell_one(broker: ShoonyaBroker, item: BasketItem, statuses: dict):
-    """Execute smart sell strategy for a single basket item."""
+def _fetch_ltp(broker: ShoonyaBroker, upstox: UpstoxBroker | None, item: BasketItem) -> float | None:
+    """Fetch LTP using Upstox (preferred) with Shoonya fallback."""
+    if upstox and item.token:
+        ltp = upstox.get_ltp(item.token)
+        if ltp is not None:
+            return ltp
+        log.debug("Upstox LTP failed for %s, trying Shoonya", item.token)
+
+    return broker.get_ltp(item.exchange, item.token)
+
+
+async def _smart_sell_one(
+    broker: ShoonyaBroker, upstox: UpstoxBroker | None,
+    item: BasketItem, statuses: dict,
+):
     sym = item.symbol
     qty = item.lots * item.lot_size
     exchange = item.exchange
 
     log.info("Smart sell starting — symbol=%s qty=%d exchange=%s", sym, qty, exchange)
 
-    ltp = broker.get_ltp(exchange, item.token)
+    ltp = await asyncio.to_thread(_fetch_ltp, broker, upstox, item)
     if ltp is None:
         log.error("Could not fetch LTP for %s — aborting", sym)
         statuses[sym]["status"] = "FAILED"
@@ -98,7 +113,7 @@ async def _smart_sell_one(broker: ShoonyaBroker, item: BasketItem, statuses: dic
         statuses[sym]["phase"] = phase["name"]
 
         for attempt in range(1, phase["retries"] + 1):
-            fresh_ltp = broker.get_ltp(exchange, item.token)
+            fresh_ltp = await asyncio.to_thread(_fetch_ltp, broker, upstox, item)
             if fresh_ltp is not None:
                 ltp = fresh_ltp
 
@@ -171,37 +186,25 @@ async def get_funds(request: Request):
 
 @router.post("/margin", response_model=MarginResponse)
 async def calculate_basket_margin(req: MarginRequest, request: Request):
-    margin_broker: ZerodhaBroker | None = request.app.state.margin_broker
-    if margin_broker is None:
-        log.debug("Margin calculation requested but Zerodha not configured")
-        return MarginResponse(error="Margin calculation not available (Zerodha not configured)")
+    upstox: UpstoxBroker | None = request.app.state.upstox_broker
+    if upstox is None:
+        return MarginResponse(error="Upstox not configured — margin calculation unavailable")
 
-    if not margin_broker.is_logged_in():
-        log.info("Zerodha not logged in, attempting login before margin calculation")
-        result = margin_broker.login()
-        if not result.get("ok"):
-            log.error("Zerodha login failed during margin request: %s", result.get("error"))
-            return MarginResponse(error=f"Zerodha login failed: {result.get('error')}")
-
-    kite_orders = []
+    instruments = []
     for item in req.orders:
-        try:
-            expiry_date = datetime.strptime(item.expiry, "%d-%b-%Y").date()
-        except ValueError:
-            return MarginResponse(error=f"Invalid expiry format: {item.expiry}")
-
-        tradingsymbol = margin_broker.build_trading_symbol(
-            item.index_id, expiry_date, item.strike, item.option_type,
-        )
-        kite_orders.append({
-            "exchange": item.exchange,
-            "tradingsymbol": tradingsymbol,
-            "transaction_type": "SELL",
+        inst_key = _resolve_instrument_key(upstox, item)
+        if not inst_key:
+            return MarginResponse(error=f"Could not resolve instrument for {item.index_id} {item.strike} {item.option_type}")
+        instruments.append({
+            "instrument_key": inst_key,
             "quantity": item.lots * item.lot_size,
+            "transaction_type": "SELL",
+            "product": "D",
         })
 
-    log.debug("Calculating basket margin for %d orders", len(kite_orders))
-    result = margin_broker.get_basket_margin(kite_orders)
+    log.debug("Calculating Upstox basket margin for %d instruments", len(instruments))
+    result = upstox.get_basket_margin(instruments)
+
     if result.get("error"):
         log.error("Margin calculation failed: %s", result["error"])
     else:
@@ -209,6 +212,27 @@ async def calculate_basket_margin(req: MarginRequest, request: Request):
                   result.get("total_margin", 0), result.get("span", 0),
                   result.get("exposure", 0), result.get("margin_benefit", 0))
     return MarginResponse(**result)
+
+
+def _resolve_instrument_key(upstox: UpstoxBroker, item: MarginItem) -> str | None:
+    """Resolve a MarginItem to an Upstox instrument_key by matching strike + option type."""
+    from datetime import datetime
+
+    try:
+        expiry = datetime.strptime(item.expiry, "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        try:
+            expiry = datetime.strptime(item.expiry, "%d-%b-%Y").strftime("%Y-%m-%d")
+        except ValueError:
+            log.error("Unparseable expiry format: %s", item.expiry)
+            return None
+
+    contracts = upstox.get_option_contracts(item.index_id, expiry)
+    for c in contracts:
+        if (c.get("strike_price") == item.strike
+                and c.get("instrument_type") == item.option_type):
+            return c.get("instrument_key")
+    return None
 
 
 @router.get("/status/{exec_id}")

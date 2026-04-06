@@ -3,17 +3,20 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-REQUIRED_ENV_VARS = [
+SHOONYA_ENV_VARS = [
     "SHOONYA_USER_ID",
     "SHOONYA_PASSWORD",
     "SHOONYA_TOTP_SECRET",
-    "SHOONYA_OAUTH_SECRET",
+    "SHOONYA_API_SECRET",
 ]
 
-ZERODHA_ENV_VARS = [
-    "ZERODHA_USER_ID",
-    "ZERODHA_PASSWORD",
-    "ZERODHA_TOTP_SECRET",
+UPSTOX_ENV_VARS = [
+    "UPSTOX_ACCESS_TOKEN",
+]
+
+UPSTOX_OPTIONAL_VARS = [
+    "UPSTOX_API_KEY",
+    "UPSTOX_API_SECRET",
 ]
 
 
@@ -26,9 +29,10 @@ def load_config() -> dict:
 
     load_dotenv(env_path)
 
-    config = {}
-    missing = []
-    for var in REQUIRED_ENV_VARS:
+    config: dict[str, str] = {}
+    missing: list[str] = []
+
+    for var in SHOONYA_ENV_VARS:
         val = os.getenv(var)
         if not val or val.startswith("your_"):
             missing.append(var)
@@ -36,9 +40,20 @@ def load_config() -> dict:
             config[var] = val
 
     if missing:
-        raise RuntimeError(f"Missing env vars: {', '.join(missing)}")
+        raise RuntimeError(f"Missing Shoonya env vars: {', '.join(missing)}")
 
-    for var in ZERODHA_ENV_VARS:
+    missing_upstox: list[str] = []
+    for var in UPSTOX_ENV_VARS:
+        val = os.getenv(var)
+        if not val or val.startswith("your_"):
+            missing_upstox.append(var)
+        else:
+            config[var] = val
+
+    if missing_upstox:
+        raise RuntimeError(f"Missing Upstox env vars: {', '.join(missing_upstox)}")
+
+    for var in UPSTOX_OPTIONAL_VARS:
         val = os.getenv(var)
         if val and not val.startswith("your_"):
             config[var] = val
@@ -46,6 +61,5 @@ def load_config() -> dict:
     return config
 
 
-def has_zerodha_config(config: dict) -> bool:
-    """Check if all Zerodha credentials are present."""
-    return all(var in config for var in ZERODHA_ENV_VARS)
+def has_upstox_config(config: dict) -> bool:
+    return all(var in config for var in UPSTOX_ENV_VARS)

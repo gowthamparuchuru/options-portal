@@ -160,7 +160,7 @@ class ShoonyaBroker(BrokerInterface):
         user_id = self._cfg["SHOONYA_USER_ID"]
         password = self._cfg["SHOONYA_PASSWORD"]
         totp_secret = self._cfg["SHOONYA_TOTP_SECRET"]
-        oauth_secret = self._cfg["SHOONYA_OAUTH_SECRET"]
+        oauth_secret = self._cfg["SHOONYA_API_SECRET"]
 
         # Step 1-3: Browser automation to obtain OAuth code
         login_url = OAUTH_LOGIN_URL.format(client_id=user_id)

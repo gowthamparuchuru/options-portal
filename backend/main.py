@@ -7,9 +7,9 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from .config import load_config, has_zerodha_config
+from .config import load_config, has_upstox_config
 from .broker.shoonya_broker import ShoonyaBroker
-from .broker.zerodha_broker import ZerodhaBroker
+from .broker.upstox_broker import UpstoxBroker
 from .routers import auth, options, orders
 from .routers.options import _feed, run_orphan_watcher
 
@@ -18,7 +18,6 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s  %(message)s",
     datefmt="%H:%M:%S",
 )
-# Keep noisy third-party libs at WARNING to avoid flooding the log
 for _lib in ("urllib3", "httpx", "websockets", "asyncio", "playwright"):
     logging.getLogger(_lib).setLevel(logging.WARNING)
 log = logging.getLogger("app")
@@ -34,18 +33,16 @@ async def lifespan(app: FastAPI):
     app.state.config = cfg
     app.state.active_executions = {}
 
-    app.state.margin_broker = None
-    if has_zerodha_config(cfg):
-        margin_broker = ZerodhaBroker(cfg)
-        result = margin_broker.login()
-        if result.get("ok"):
-            app.state.margin_broker = margin_broker
-            log.info("Zerodha margin broker ready")
+    app.state.upstox_broker = None
+    if has_upstox_config(cfg):
+        upstox = UpstoxBroker(cfg["UPSTOX_ACCESS_TOKEN"])
+        if upstox.validate_token():
+            app.state.upstox_broker = upstox
+            log.info("Upstox market data broker ready")
         else:
-            log.warning("Zerodha login failed: %s — margin calculation disabled",
-                        result.get("error"))
+            log.warning("Upstox token validation failed — market data features degraded")
     else:
-        log.info("Zerodha credentials not configured — margin calculation disabled")
+        log.info("Upstox credentials not configured — market data features disabled")
 
     watcher_task = asyncio.create_task(run_orphan_watcher())
     log.info("App started — broker ready (orphan watcher active)")
