@@ -186,7 +186,26 @@ export default function App() {
           <div className="content-grid">
             <div className="chart-column">
               {chainActive && selectedIndex && (
-                <SpotChart indexId={selectedIndex} spotPrice={spotPrice} />
+                <>
+                  <div className="panel trade-note-box">
+                    <div className="trade-note-title">
+                      {selectedIndex === "SENSEX" ? "SENSEX" : "NIFTY"} Trade Parameters
+                    </div>
+                    <div className="trade-note-row">
+                      <span className="trade-note-label">Safe Variance</span>
+                      <span className="trade-note-value">
+                        {selectedIndex === "SENSEX" ? "3%" : "2.5%"}
+                      </span>
+                    </div>
+                    <div className="trade-note-row">
+                      <span className="trade-note-label">Premium Target</span>
+                      <span className="trade-note-value">
+                        {selectedIndex === "SENSEX" ? "₹2.5" : "₹1.5"}
+                      </span>
+                    </div>
+                  </div>
+                  <SpotChart indexId={selectedIndex} spotPrice={spotPrice} />
+                </>
               )}
             </div>
 

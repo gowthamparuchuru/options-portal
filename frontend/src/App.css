@@ -709,6 +709,41 @@ body {
   background: var(--red);
 }
 
+/* ── Trade Note Box ───────────────────────────────────── */
+.trade-note-box {
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.trade-note-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  margin-bottom: 2px;
+}
+
+.trade-note-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.trade-note-label {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.trade-note-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ── Chart ────────────────────────────────────────────── */
 .chart-column {
   display: flex;
