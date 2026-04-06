@@ -39,7 +39,7 @@ async def get_candles(index_id: str, request: Request):
     from_dt = datetime.combine(now.date() - timedelta(days=5), market_open)
     to_dt = now
 
-    candles = upstox.get_historical_candles(index_id, from_dt, to_dt, "15minute")
+    candles = upstox.get_historical_candles(index_id, from_dt, to_dt, unit="minutes", interval=15)
 
     if not candles:
         return {"error": "No candle data available"}

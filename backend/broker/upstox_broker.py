@@ -5,10 +5,8 @@ from __future__ import annotations
 import calendar as _calendar
 import json
 import logging
-from datetime import date, datetime, timedelta
-from typing import Callable
+from datetime import date, datetime
 
-import requests as http_requests
 import upstox_client
 
 log = logging.getLogger("upstox")
@@ -36,39 +34,13 @@ class UpstoxBroker:
         },
     }
 
-    BASE_URL = "https://api.upstox.com"
-
     def __init__(self, access_token: str):
         self._token = access_token
-        self._headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Authorization": f"Bearer {access_token}",
-        }
 
-    def _get(self, path: str, params: dict | None = None) -> dict | list | None:
-        url = f"{self.BASE_URL}{path}"
-        try:
-            resp = http_requests.get(url, headers=self._headers, params=params, timeout=15)
-            if resp.status_code == 401:
-                log.error(
-                    "Upstox 401 Unauthorized at %s — access token expired or invalid. "
-                    "Generate a fresh token at https://account.upstox.com/developer/apps",
-                    path,
-                )
-                return None
-            resp.raise_for_status()
-            body = resp.json()
-            if body.get("status") == "success":
-                return body.get("data")
-            log.warning("Upstox API non-success at %s: %s", path, body)
-            return None
-        except http_requests.exceptions.HTTPError:
-            log.exception("Upstox API HTTP error: GET %s", path)
-            return None
-        except Exception:
-            log.exception("Upstox API request failed: GET %s", path)
-            return None
+    def _make_api_client(self) -> upstox_client.ApiClient:
+        configuration = upstox_client.Configuration()
+        configuration.access_token = self._token
+        return upstox_client.ApiClient(configuration)
 
     # ── Validation ───────────────────────────────────────────────
 
@@ -83,27 +55,31 @@ class UpstoxBroker:
     # ── LTP ──────────────────────────────────────────────────────
 
     def get_ltp(self, instrument_key: str) -> float | None:
-        data = self._get("/v3/market-quote/ltp", params={"instrument_key": instrument_key})
-        if not data or not isinstance(data, dict):
-            return None
-        for _key, val in data.items():
-            lp = val.get("last_price")
-            if lp is not None:
-                return float(lp)
+        try:
+            quote_api = upstox_client.MarketQuoteV3Api(self._make_api_client())
+            resp = quote_api.get_ltp(instrument_key=instrument_key)
+            if resp.status == "success" and resp.data:
+                for val in resp.data.values():
+                    if val.last_price is not None:
+                        return float(val.last_price)
+        except Exception:
+            log.exception("Upstox LTP fetch failed for %s", instrument_key)
         return None
 
     def get_ltp_batch(self, instrument_keys: list[str]) -> dict[str, float]:
         result: dict[str, float] = {}
+        quote_api = upstox_client.MarketQuoteV3Api(self._make_api_client())
         for i in range(0, len(instrument_keys), 500):
             batch = instrument_keys[i : i + 500]
             keys_param = ",".join(batch)
-            data = self._get("/v3/market-quote/ltp", params={"instrument_key": keys_param})
-            if data and isinstance(data, dict):
-                for resp_key, val in data.items():
-                    inst_key = val.get("instrument_token", resp_key)
-                    lp = val.get("last_price")
-                    if lp is not None:
-                        result[inst_key] = float(lp)
+            try:
+                resp = quote_api.get_ltp(instrument_key=keys_param)
+                if resp.status == "success" and resp.data:
+                    for val in resp.data.values():
+                        if val.last_price is not None:
+                            result[val.instrument_token] = float(val.last_price)
+            except Exception:
+                log.exception("Upstox LTP batch fetch failed")
         return result
 
     # ── Historical Candles ───────────────────────────────────────
@@ -113,40 +89,54 @@ class UpstoxBroker:
         index_id: str,
         from_dt: datetime,
         to_dt: datetime,
-        interval: str = "30minute",
+        unit: str = "minutes",
+        interval: int = 15,
     ) -> list[dict]:
-        """Fetch OHLC candles. Upstox supports 1minute, 30minute, day, week, month."""
+        """Fetch OHLC candles via Upstox V3 SDK (HistoryV3Api).
+
+        unit: minutes | hours | days | weeks | months
+        interval: 1-300 for minutes, 1-5 for hours, 1 for days/weeks/months
+        """
         cfg = self.INDEX_CONFIG.get(index_id)
         if not cfg:
             log.warning("Unknown index for candles: %s", index_id)
             return []
 
-        encoded_key = http_requests.utils.quote(cfg["instrument_key"], safe="")
+        history_api = upstox_client.HistoryV3Api(self._make_api_client())
+
+        instrument_key = cfg["instrument_key"]
         to_str = to_dt.strftime("%Y-%m-%d")
         from_str = from_dt.strftime("%Y-%m-%d")
 
         candles: list[dict] = []
 
-        hist_path = f"/v2/historical-candle/{encoded_key}/{interval}/{to_str}/{from_str}"
-        hist_data = self._get(hist_path)
-        if hist_data and isinstance(hist_data, dict) and "candles" in hist_data:
-            for c in hist_data["candles"]:
-                ts = self._parse_candle_ts(c[0])
-                if ts:
-                    candles.append({"time": ts, "open": c[1], "high": c[2], "low": c[3], "close": c[4]})
+        try:
+            resp = history_api.get_historical_candle_data1(
+                instrument_key, unit, interval, to_str, from_str,
+            )
+            if resp.status == "success" and resp.data and resp.data.candles:
+                for c in resp.data.candles:
+                    ts = self._parse_candle_ts(c[0])
+                    if ts:
+                        candles.append({"time": ts, "open": c[1], "high": c[2], "low": c[3], "close": c[4]})
+        except Exception:
+            log.exception("Upstox V3 historical candle fetch failed for %s", index_id)
 
-        intra_interval = interval if interval in ("1minute", "30minute") else "30minute"
-        intra_path = f"/v2/historical-candle/intraday/{encoded_key}/{intra_interval}"
-        intra_data = self._get(intra_path)
-        if intra_data and isinstance(intra_data, dict) and "candles" in intra_data:
-            existing_ts = {c["time"] for c in candles}
-            for c in intra_data["candles"]:
-                ts = self._parse_candle_ts(c[0])
-                if ts and ts not in existing_ts:
-                    candles.append({"time": ts, "open": c[1], "high": c[2], "low": c[3], "close": c[4]})
+        try:
+            intra_resp = history_api.get_intra_day_candle_data(
+                instrument_key, unit, interval,
+            )
+            if intra_resp.status == "success" and intra_resp.data and intra_resp.data.candles:
+                existing_ts = {c["time"] for c in candles}
+                for c in intra_resp.data.candles:
+                    ts = self._parse_candle_ts(c[0])
+                    if ts and ts not in existing_ts:
+                        candles.append({"time": ts, "open": c[1], "high": c[2], "low": c[3], "close": c[4]})
+        except Exception:
+            log.exception("Upstox V3 intraday candle fetch failed for %s", index_id)
 
         candles.sort(key=lambda x: x["time"])
-        log.debug("Fetched %d candles for %s (%s)", len(candles), index_id, interval)
+        log.debug("Fetched %d candles for %s (%s/%s)", len(candles), index_id, unit, interval)
         return candles
 
     @staticmethod
@@ -164,36 +154,40 @@ class UpstoxBroker:
         if not cfg:
             return None
 
-        data = self._get("/v2/option/contract", params={"instrument_key": cfg["instrument_key"]})
-        if not data or not isinstance(data, list):
-            return None
+        try:
+            options_api = upstox_client.OptionsApi(self._make_api_client())
+            resp = options_api.get_option_contracts(cfg["instrument_key"])
+            if resp.status != "success" or not resp.data:
+                return None
 
-        today = date.today()
-        expiries: set[date] = set()
-        for contract in data:
-            exp_str = contract.get("expiry")
-            if exp_str:
-                try:
-                    exp = datetime.strptime(exp_str, "%Y-%m-%d").date()
+            today = date.today()
+            expiries: set[date] = set()
+            for contract in resp.data:
+                if contract.expiry:
+                    exp = contract.expiry.date() if isinstance(contract.expiry, datetime) else contract.expiry
                     if exp >= today:
                         expiries.add(exp)
-                except ValueError:
-                    continue
 
-        if not expiries:
+            if not expiries:
+                return None
+            return min(expiries).strftime("%Y-%m-%d")
+        except Exception:
+            log.exception("Upstox get_nearest_expiry failed for %s", index_id)
             return None
-        return min(expiries).strftime("%Y-%m-%d")
 
     def get_option_contracts(self, index_id: str, expiry_date: str) -> list[dict]:
         cfg = self.INDEX_CONFIG.get(index_id)
         if not cfg:
             return []
 
-        data = self._get("/v2/option/contract", params={
-            "instrument_key": cfg["instrument_key"],
-            "expiry_date": expiry_date,
-        })
-        return data if isinstance(data, list) else []
+        try:
+            options_api = upstox_client.OptionsApi(self._make_api_client())
+            resp = options_api.get_option_contracts(cfg["instrument_key"], expiry_date=expiry_date)
+            if resp.status == "success" and resp.data:
+                return [c.to_dict() for c in resp.data]
+        except Exception:
+            log.exception("Upstox get_option_contracts failed for %s", index_id)
+        return []
 
     def get_option_chain_data(
         self, index_id: str, expiry_date: str, spot_price: float, range_pct: float = 3.0,
@@ -208,12 +202,15 @@ class UpstoxBroker:
         if not cfg:
             return None
 
-        chain_data = self._get("/v2/option/chain", params={
-            "instrument_key": cfg["instrument_key"],
-            "expiry_date": expiry_date,
-        })
-        if not chain_data or not isinstance(chain_data, list):
-            log.error("Empty option chain for %s expiry=%s", index_id, expiry_date)
+        try:
+            options_api = upstox_client.OptionsApi(self._make_api_client())
+            resp = options_api.get_put_call_option_chain(cfg["instrument_key"], expiry_date)
+            if resp.status != "success" or not resp.data:
+                log.error("Empty option chain for %s expiry=%s", index_id, expiry_date)
+                return None
+            chain_data = resp.data
+        except Exception:
+            log.exception("Upstox option chain fetch failed for %s", index_id)
             return None
 
         contracts = self.get_option_contracts(index_id, expiry_date)
@@ -228,14 +225,12 @@ class UpstoxBroker:
 
         strikes: dict[float, dict] = {}
         for item in chain_data:
-            sp = item.get("strike_price")
+            sp = item.strike_price
             if sp is None or sp < lower or sp > upper:
                 continue
 
-            ce = item.get("call_options") or {}
-            pe = item.get("put_options") or {}
-            ce_key = ce.get("instrument_key")
-            pe_key = pe.get("instrument_key")
+            ce_key = item.call_options.instrument_key if item.call_options else None
+            pe_key = item.put_options.instrument_key if item.put_options else None
 
             strikes[float(sp)] = {
                 "strike": float(sp),
@@ -270,10 +265,7 @@ class UpstoxBroker:
         Returns: {total_margin, span, exposure, margin_benefit, option_premium, error}
         """
         try:
-            configuration = upstox_client.Configuration()
-            configuration.access_token = self._token
-            api_client = upstox_client.ApiClient(configuration)
-            api_instance = upstox_client.ChargeApi(api_client)
+            api_instance = upstox_client.ChargeApi(self._make_api_client())
 
             sdk_instruments = []
             for inst in instruments:
@@ -333,10 +325,7 @@ class UpstoxBroker:
     def create_streamer(
         self, instrument_keys: list[str] | None = None, mode: str = "ltpc",
     ) -> upstox_client.MarketDataStreamerV3:
-        configuration = upstox_client.Configuration()
-        configuration.access_token = self._token
-        api_client = upstox_client.ApiClient(configuration)
-
+        api_client = self._make_api_client()
         if instrument_keys:
             return upstox_client.MarketDataStreamerV3(api_client, instrument_keys, mode)
         return upstox_client.MarketDataStreamerV3(api_client)
