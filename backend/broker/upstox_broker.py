@@ -143,7 +143,7 @@ class UpstoxBroker:
     def _parse_candle_ts(ts_str: str) -> int | None:
         try:
             dt = datetime.fromisoformat(ts_str)
-            return int(_calendar.timegm(dt.utctimetuple()))
+            return int(_calendar.timegm(dt.timetuple()))
         except Exception:
             return None
 

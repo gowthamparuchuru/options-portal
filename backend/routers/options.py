@@ -81,7 +81,7 @@ async def get_option_chain_snapshot(index_id: str, request: Request):
     if spot is None:
         return {"error": "Failed to fetch spot price"}
 
-    chain = upstox.get_option_chain_data(index_id, expiry, spot, range_pct=3.0)
+    chain = upstox.get_option_chain_data(index_id, expiry, spot, range_pct=3.5)
     if not chain:
         return {"error": "No strikes found in range"}
 
@@ -251,7 +251,7 @@ async def option_chain_ws(ws: WebSocket, index_id: str):
         await ws.close()
         return
 
-    chain = upstox.get_option_chain_data(index_id, expiry, spot, range_pct=3.0)
+    chain = upstox.get_option_chain_data(index_id, expiry, spot, range_pct=3.5)
     if not chain:
         await ws.send_json({"type": "error", "message": "No strikes in range"})
         await ws.close()

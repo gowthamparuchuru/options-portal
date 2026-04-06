@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { createChart, CandlestickSeries } from "lightweight-charts";
+import { createChart, CandlestickSeries, createSeriesMarkers } from "lightweight-charts";
 
 const IST_OFFSET_SEC = 5.5 * 3600;
 const CANDLE_INTERVAL_SEC = 15 * 60;
@@ -111,7 +111,7 @@ export default function SpotChart({ indexId, spotPrice }) {
         }
         series.setData(data.candles);
         const dayMarkers = buildDayBreakMarkers(data.candles);
-        if (dayMarkers.length) series.setMarkers(dayMarkers);
+        if (dayMarkers.length) createSeriesMarkers(series, dayMarkers);
         chart.timeScale().fitContent();
         if (data.candles.length > 0) {
           const last = data.candles[data.candles.length - 1];
