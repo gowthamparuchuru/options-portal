@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable
 
 import concurrent.futures
+import time
 
 import pyotp
 import requests
@@ -109,6 +110,33 @@ class ShoonyaBroker(BrokerInterface):
         self._api = _ShoonyaApi()
         self._logged_in = False
 
+    def _retry_api(self, api_call, *args, max_retries=3, retry_on_none=True, **kwargs):
+        """Call a Shoonya API method with retries and exponential backoff."""
+        last_exc = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                result = api_call(*args, **kwargs)
+                if result is not None or not retry_on_none:
+                    return result
+                if attempt < max_retries:
+                    wait = 0.5 * (2 ** (attempt - 1))
+                    log.warning("Shoonya %s returned None, retry %d/%d in %.1fs",
+                                api_call.__name__, attempt, max_retries, wait)
+                    time.sleep(wait)
+            except Exception as e:
+                last_exc = e
+                if attempt < max_retries:
+                    wait = 0.5 * (2 ** (attempt - 1))
+                    log.warning("Shoonya %s failed: %s, retry %d/%d in %.1fs",
+                                api_call.__name__, e, attempt, max_retries, wait)
+                    time.sleep(wait)
+                else:
+                    log.error("Shoonya %s failed after %d attempts: %s",
+                              api_call.__name__, max_retries, e)
+        if last_exc:
+            raise last_exc
+        return None
+
     # ── Symbol building ────────────────────────────────────────────
 
     def build_trading_symbol(self, index_name: str, expiry: date,
@@ -145,7 +173,7 @@ class ShoonyaBroker(BrokerInterface):
                 password=self._cfg["SHOONYA_PASSWORD"],
                 usertoken=cached,
             )
-            test = self._api.get_quotes(exchange="NSE", token="26000")
+            test = self._retry_api(self._api.get_quotes, exchange="NSE", token="26000")
             if test and test.get("stat") == "Ok":
                 self._logged_in = True
                 log.info("Login successful (cached session) for user: %s", user_id)
@@ -240,7 +268,7 @@ class ShoonyaBroker(BrokerInterface):
 
     def get_available_margin(self) -> dict | None:
         log.debug("Fetching available margin/funds from Shoonya")
-        resp = self._api.get_limits()
+        resp = self._retry_api(self._api.get_limits)
         if not resp or resp.get("stat") != "Ok":
             log.warning("get_limits failed: %s", resp)
             return None
@@ -261,7 +289,7 @@ class ShoonyaBroker(BrokerInterface):
 
     def get_spot_price(self, exchange: str, token: str) -> float | None:
         log.debug("Fetching spot price for %s|%s", exchange, token)
-        resp = self._api.get_quotes(exchange=exchange, token=token)
+        resp = self._retry_api(self._api.get_quotes, exchange=exchange, token=token)
         if resp and resp.get("stat") == "Ok":
             ltp = float(resp.get("lp", 0))
             if ltp > 0:
@@ -357,7 +385,8 @@ class ShoonyaBroker(BrokerInterface):
         log.info("Placing SELL order — symbol=%s qty=%d price=%.2f exchange=%s",
                  symbol, quantity, price, exchange)
         try:
-            resp = self._api.place_order(
+            resp = self._retry_api(
+                self._api.place_order,
                 buy_or_sell="S",
                 product_type=product_type,
                 exchange=exchange,
@@ -369,6 +398,7 @@ class ShoonyaBroker(BrokerInterface):
                 trigger_price=None,
                 retention="DAY",
                 remarks="portal_sell",
+                retry_on_none=False,
             )
             if resp is None:
                 log.error("Place order returned no response for %s", symbol)
@@ -391,13 +421,15 @@ class ShoonyaBroker(BrokerInterface):
         log.info("Modifying order — order_id=%s symbol=%s new_price=%.2f",
                  order_id, tradingsymbol, new_price)
         try:
-            resp = self._api.modify_order(
+            resp = self._retry_api(
+                self._api.modify_order,
                 orderno=order_id,
                 exchange=exchange,
                 tradingsymbol=tradingsymbol,
                 newquantity=quantity,
                 newprice_type="LMT",
                 newprice=new_price,
+                retry_on_none=False,
             )
             success = bool(resp and resp.get("stat") == "Ok")
             if success:
@@ -412,7 +444,7 @@ class ShoonyaBroker(BrokerInterface):
     def cancel_order(self, order_id: str) -> bool:
         log.info("Cancelling order — order_id=%s", order_id)
         try:
-            resp = self._api.cancel_order(orderno=order_id)
+            resp = self._retry_api(self._api.cancel_order, orderno=order_id, retry_on_none=False)
             success = bool(resp and resp.get("stat") == "Ok")
             if success:
                 log.info("Order %s cancelled successfully", order_id)
@@ -426,7 +458,7 @@ class ShoonyaBroker(BrokerInterface):
     def get_order_status(self, order_id: str) -> dict | None:
         log.debug("Fetching status for order %s", order_id)
         try:
-            resp = self._api.single_order_history(orderno=order_id)
+            resp = self._retry_api(self._api.single_order_history, orderno=order_id)
             if not resp or not isinstance(resp, list) or len(resp) == 0:
                 log.debug("No order history returned for %s", order_id)
                 return None
