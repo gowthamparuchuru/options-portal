@@ -3,13 +3,28 @@
 from __future__ import annotations
 
 import calendar as _calendar
+import concurrent.futures
 import json
 import logging
+import re
+import tempfile
+import urllib.parse
 from datetime import date, datetime
+from pathlib import Path
 
+import pyotp
 import upstox_client
+from upstox_client.rest import ApiException
+from playwright.sync_api import sync_playwright
 
 log = logging.getLogger("upstox")
+
+SESSION_CACHE = Path(tempfile.gettempdir()) / ".upstox_session_cache"
+
+UPSTOX_LOGIN_URL = (
+    "https://api.upstox.com/v2/login/authorization/dialog"
+    "?response_type=code&client_id={client_id}&redirect_uri={redirect_uri}"
+)
 
 
 class UpstoxBroker:
@@ -34,18 +49,161 @@ class UpstoxBroker:
         },
     }
 
-    def __init__(self, access_token: str):
-        self._token = access_token
+    def __init__(self, config: dict):
+        self._cfg = config
+        self._token: str | None = None
+        self._logged_in = False
 
     def _make_api_client(self) -> upstox_client.ApiClient:
         configuration = upstox_client.Configuration()
         configuration.access_token = self._token
         return upstox_client.ApiClient(configuration)
 
+    # ── Auth ──────────────────────────────────────────────────────
+
+    def login(self) -> dict:
+        log.info("Upstox login attempt")
+        cached = self._load_cached_session()
+        if cached:
+            log.debug("Found cached Upstox token, validating...")
+            self._token = cached
+            if self.validate_token():
+                self._logged_in = True
+                log.info("Upstox login successful (cached session)")
+                return {"ok": True, "msg": "Using cached session"}
+            log.warning("Cached Upstox token expired — proceeding with fresh OAuth login")
+
+        try:
+            code = self._oauth_browser_login()
+            token = self._exchange_code_for_token(code)
+            self._token = token
+            self._save_session_cache(token)
+            self._logged_in = True
+            log.info("Upstox login successful (fresh OAuth)")
+            return {"ok": True, "msg": "Login successful"}
+        except Exception as exc:
+            log.error("Upstox OAuth login failed: %s", exc)
+            return {"ok": False, "error": str(exc)}
+
+    def _oauth_browser_login(self) -> str:
+        """Automate the Upstox OAuth flow via headless Chromium to obtain the auth code."""
+        api_key = self._cfg["UPSTOX_API_KEY"]
+        redirect_uri = self._cfg["UPSTOX_REDIRECT_URI"]
+        mobile = self._cfg["UPSTOX_MOBILE_NUMBER"]
+        totp_secret = self._cfg["UPSTOX_TOTP_SECRET"]
+        pin = self._cfg["UPSTOX_PIN"]
+
+        encoded_redirect = urllib.parse.quote(redirect_uri, safe="")
+        login_url = UPSTOX_LOGIN_URL.format(client_id=api_key, redirect_uri=encoded_redirect)
+        log.info("Starting Upstox OAuth browser automation")
+        log.debug("Login URL: %s", login_url)
+
+        def _run_browser() -> str:
+            log.debug("Launching headless Chromium for Upstox OAuth")
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context(
+                    no_viewport=True,
+                    ignore_https_errors=True,
+                )
+                context.clear_cookies()
+                page = context.new_page()
+
+                page.goto(login_url, wait_until="networkidle")
+
+                log.debug("Step 1: Entering mobile number")
+                page.wait_for_selector("#mobileNum", state="visible", timeout=15000)
+                page.fill("#mobileNum", mobile)
+                page.wait_for_selector("#getOtp:not([disabled])", timeout=10000)
+                page.click("#getOtp")
+
+                log.debug("Step 2: Entering TOTP")
+                page.wait_for_selector("#otpNum", state="visible", timeout=30000)
+                totp = pyotp.TOTP(totp_secret).now()
+                page.fill("#otpNum", totp)
+                page.wait_for_selector("#continueBtn:not([disabled])", timeout=10000)
+                page.click("#continueBtn")
+
+                log.debug("Step 3: Entering PIN")
+                page.wait_for_selector("#pinCode", state="visible", timeout=30000)
+                page.fill("#pinCode", pin)
+                page.wait_for_selector("#pinContinueBtn:not([disabled])", timeout=10000)
+
+                log.debug("Clicking Continue and waiting for redirect request...")
+                with page.expect_request(
+                    lambda req: req.url.startswith(redirect_uri),
+                    timeout=30000,
+                ) as req_info:
+                    page.click("#pinContinueBtn")
+
+                redirect_url = req_info.value.url
+                log.debug("Captured redirect URL: %s", redirect_url)
+                browser.close()
+
+            params = urllib.parse.parse_qs(urllib.parse.urlparse(redirect_url).query)
+            code = params.get("code", [None])[0]
+            if not code:
+                raise RuntimeError(f"No code param in redirect URL: {redirect_url}")
+            return code
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(_run_browser).result()
+
+    def _exchange_code_for_token(self, code: str) -> str:
+        """Exchange the OAuth authorization code for an access token."""
+        api_key = self._cfg["UPSTOX_API_KEY"]
+        api_secret = self._cfg["UPSTOX_API_SECRET"]
+        redirect_uri = self._cfg["UPSTOX_REDIRECT_URI"]
+
+        log.debug("Exchanging auth code for access token")
+        api_instance = upstox_client.LoginApi(upstox_client.ApiClient(upstox_client.Configuration()))
+        try:
+            resp = api_instance.token(
+                "2.0",
+                code=code,
+                client_id=api_key,
+                client_secret=api_secret,
+                redirect_uri=redirect_uri,
+                grant_type="authorization_code",
+            )
+        except ApiException as e:
+            raise RuntimeError(f"Token exchange failed (HTTP {e.status}): {e.body}") from e
+
+        if hasattr(resp, "access_token") and resp.access_token:
+            log.info("Upstox token exchange successful")
+            return resp.access_token
+
+        raise RuntimeError(f"Token exchange returned no access_token: {resp}")
+
+    def is_logged_in(self) -> bool:
+        return self._logged_in
+
+    def _load_cached_session(self) -> str | None:
+        log.debug("Checking Upstox session cache at: %s", SESSION_CACHE)
+        if not SESSION_CACHE.exists():
+            log.debug("No Upstox session cache file found")
+            return None
+        try:
+            data = json.loads(SESSION_CACHE.read_text())
+            if data.get("date") == str(date.today()):
+                log.debug("Valid Upstox session cache found for today")
+                return data.get("access_token")
+            log.debug("Upstox session cache is from %s (today is %s), ignoring",
+                       data.get("date"), date.today())
+        except (json.JSONDecodeError, KeyError):
+            log.warning("Failed to parse Upstox session cache at %s", SESSION_CACHE)
+        return None
+
+    def _save_session_cache(self, token: str):
+        SESSION_CACHE.write_text(json.dumps({"date": str(date.today()), "access_token": token}))
+        log.debug("Upstox access token cached to %s", SESSION_CACHE)
+
     # ── Validation ───────────────────────────────────────────────
 
     def validate_token(self) -> bool:
         """Quick check that the access token works."""
+        if not self._token:
+            return False
         try:
             ltp = self.get_ltp("NSE_INDEX|Nifty 50")
             return ltp is not None

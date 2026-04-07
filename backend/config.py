@@ -11,12 +11,12 @@ SHOONYA_ENV_VARS = [
 ]
 
 UPSTOX_ENV_VARS = [
-    "UPSTOX_ACCESS_TOKEN",
-]
-
-UPSTOX_OPTIONAL_VARS = [
     "UPSTOX_API_KEY",
     "UPSTOX_API_SECRET",
+    "UPSTOX_REDIRECT_URI",
+    "UPSTOX_MOBILE_NUMBER",
+    "UPSTOX_TOTP_SECRET",
+    "UPSTOX_PIN",
 ]
 
 
@@ -52,11 +52,6 @@ def load_config() -> dict:
 
     if missing_upstox:
         raise RuntimeError(f"Missing Upstox env vars: {', '.join(missing_upstox)}")
-
-    for var in UPSTOX_OPTIONAL_VARS:
-        val = os.getenv(var)
-        if val and not val.startswith("your_"):
-            config[var] = val
 
     return config
 

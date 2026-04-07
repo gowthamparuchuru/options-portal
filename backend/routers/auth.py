@@ -40,10 +40,20 @@ async def broker_status(request: Request):
     if upstox is None:
         upstox_error = "Not configured"
     else:
-        result = upstox.check_profile()
-        upstox_ok = result["ok"]
-        if not upstox_ok:
-            upstox_error = result.get("error", "Unknown error")
+        try:
+            if not upstox.is_logged_in():
+                log.info("Upstox not logged in — triggering login")
+                result = upstox.login()
+                if not result["ok"]:
+                    upstox_error = result.get("error", "Login failed")
+
+            if upstox.is_logged_in():
+                profile = upstox.check_profile()
+                upstox_ok = profile["ok"]
+                if not upstox_ok:
+                    upstox_error = upstox_error or profile.get("error", "Profile check failed")
+        except Exception as e:
+            upstox_error = str(e)
 
     return JSONResponse(content={
         "shoonya": {"ok": shoonya_ok, "error": shoonya_error},

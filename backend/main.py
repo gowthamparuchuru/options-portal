@@ -35,12 +35,8 @@ async def lifespan(app: FastAPI):
 
     app.state.upstox_broker = None
     if has_upstox_config(cfg):
-        upstox = UpstoxBroker(cfg["UPSTOX_ACCESS_TOKEN"])
-        if upstox.validate_token():
-            app.state.upstox_broker = upstox
-            log.info("Upstox market data broker ready")
-        else:
-            log.warning("Upstox token validation failed — market data features degraded")
+        app.state.upstox_broker = UpstoxBroker(cfg)
+        log.info("Upstox broker created (login deferred to first /broker-status call)")
     else:
         log.info("Upstox credentials not configured — market data features disabled")
 
