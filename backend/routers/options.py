@@ -100,6 +100,20 @@ async def get_option_chain_snapshot(index_id: str, request: Request):
 
 ORPHAN_TIMEOUT_SECS = 30 * 60
 
+COMPANION_INDICES = {
+    "NIFTY": [
+        {"key": "NSE_INDEX|Nifty 50", "label": "NIFTY 50"},
+        {"key": "GLOBAL_INDEX|SGX+NIFTY", "label": "SGX NIFTY"},
+        {"key": "NSE_INDEX|India VIX", "label": "INDIA VIX"},
+    ],
+    "SENSEX": [
+        {"key": "BSE_INDEX|SENSEX", "label": "SENSEX"},
+        {"key": "NSE_INDEX|Nifty 50", "label": "NIFTY 50"},
+        {"key": "GLOBAL_INDEX|SGX+NIFTY", "label": "SGX NIFTY"},
+        {"key": "NSE_INDEX|India VIX", "label": "INDIA VIX"},
+    ],
+}
+
 
 class _LiveFeed:
     """Manages one Upstox MarketDataStreamerV3 and fans ticks to browser clients."""
@@ -107,6 +121,7 @@ class _LiveFeed:
     def __init__(self):
         self.lock = Lock()
         self.prices: dict[str, float] = {}
+        self.closes: dict[str, float] = {}
         self.connected = False
         self._started = False
         self._client_count = 0
@@ -115,10 +130,38 @@ class _LiveFeed:
         self._upstox: UpstoxBroker | None = None
 
     def _on_message(self, message):
-        parsed = UpstoxBroker.parse_ws_message(message)
-        if parsed:
-            with self.lock:
-                self.prices.update(parsed)
+        if isinstance(message, str):
+            try:
+                data = json.loads(message)
+            except (json.JSONDecodeError, TypeError):
+                return
+        elif isinstance(message, dict):
+            data = message
+        else:
+            return
+
+        if data.get("type") != "live_feed":
+            return
+
+        prices, closes = {}, {}
+        for inst_key, payload in data.get("feeds", {}).items():
+            ltpc = payload.get("ltpc") or payload.get("ff", {}).get("ltpc")
+            if not ltpc:
+                ff = payload.get("ff", {})
+                ltpc = (ff.get("eFeedDetails") or ff.get("marketFF") or {}).get("ltpc")
+            if ltpc:
+                ltp = ltpc.get("ltp")
+                if ltp is not None:
+                    prices[inst_key] = float(ltp)
+                cp = ltpc.get("cp")
+                if cp is not None:
+                    closes[inst_key] = float(cp)
+
+        with self.lock:
+            if prices:
+                self.prices.update(prices)
+            if closes:
+                self.closes.update(closes)
 
     def _on_open(self):
         with self.lock:
@@ -168,6 +211,10 @@ class _LiveFeed:
         with self.lock:
             return dict(self.prices)
 
+    def snapshot_closes(self) -> dict:
+        with self.lock:
+            return dict(self.closes)
+
     def add_client(self):
         with self.lock:
             self._client_count += 1
@@ -198,6 +245,7 @@ class _LiveFeed:
             self._started = False
             self.connected = False
             self.prices.clear()
+            self.closes.clear()
             self._streamer = None
             self._upstox = None
             self._last_client_left = None
@@ -274,6 +322,14 @@ async def option_chain_ws(ws: WebSocket, index_id: str):
         if s_data["pe_token"]:
             tokens_to_sub.append(s_data["pe_token"])
 
+    companion_defs = COMPANION_INDICES.get(index_id, [])
+    companion_keys = [ci["key"] for ci in companion_defs]
+    for k in companion_keys:
+        if k not in tokens_to_sub:
+            tokens_to_sub.append(k)
+
+    companion_ltps = upstox.get_ltp_batch(companion_keys) if companion_keys else {}
+
     if not _feed._started:
         _feed.start(upstox, tokens_to_sub)
         await asyncio.sleep(3)
@@ -281,6 +337,15 @@ async def option_chain_ws(ws: WebSocket, index_id: str):
         _feed.subscribe(tokens_to_sub)
 
     spot_key = cfg["instrument_key"]
+
+    companion_init = []
+    for ci in companion_defs:
+        companion_init.append({
+            "key": ci["key"],
+            "label": ci["label"],
+            "price": companion_ltps.get(ci["key"]),
+            "change": None,
+        })
 
     await ws.send_json({
         "type": "init",
@@ -290,14 +355,36 @@ async def option_chain_ws(ws: WebSocket, index_id: str):
         "spot_token": spot_key,
         "strikes": chain["strikes"],
         "atm": chain["atm"],
+        "companion": companion_init,
     })
 
     _feed.add_client()
     try:
         while True:
             prices = _feed.snapshot()
+            closes = _feed.snapshot_closes()
             spot_now = prices.get(spot_key, spot)
-            await ws.send_json({"type": "tick", "prices": prices, "spot": spot_now})
+
+            companion_tick = []
+            for ci in companion_defs:
+                ltp = prices.get(ci["key"])
+                cp = closes.get(ci["key"])
+                change = None
+                if ltp is not None and cp is not None and cp > 0:
+                    change = round(((ltp - cp) / cp) * 100, 2)
+                companion_tick.append({
+                    "key": ci["key"],
+                    "label": ci["label"],
+                    "price": ltp,
+                    "change": change,
+                })
+
+            await ws.send_json({
+                "type": "tick",
+                "prices": prices,
+                "spot": spot_now,
+                "companion": companion_tick,
+            })
             await asyncio.sleep(0.5)
     except WebSocketDisconnect:
         log.info("Browser WS disconnected")

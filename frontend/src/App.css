@@ -759,6 +759,53 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* ── Index Quotes ─────────────────────────────────────── */
+.index-quotes-body {
+  padding: 8px 14px;
+}
+
+.index-quote-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.index-quote-row:last-child {
+  border-bottom: none;
+}
+
+.index-quote-label {
+  flex: 1;
+  font-weight: 500;
+  color: var(--text-dim);
+}
+
+.index-quote-price {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  margin-right: 10px;
+}
+
+.index-quote-change {
+  min-width: 60px;
+  text-align: right;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.index-quote-change.up {
+  color: var(--green);
+}
+
+.index-quote-change.down {
+  color: var(--red);
+}
+
 /* ── Chart ────────────────────────────────────────────── */
 .chart-column {
   display: flex;

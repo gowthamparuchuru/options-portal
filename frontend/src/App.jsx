@@ -8,6 +8,7 @@ import Basket from "./components/Basket";
 import LotModal from "./components/LotModal";
 import ConfirmModal from "./components/ConfirmModal";
 import OrderTracker from "./components/OrderTracker";
+import IndexQuotes from "./components/IndexQuotes";
 
 export default function App() {
   const [brokerStatus, setBrokerStatus] = useState(null);
@@ -18,6 +19,7 @@ export default function App() {
   const [editModal, setEditModal] = useState(null);
   const [showConfirm, setShowConfirm] = useState(false);
   const [spotPrice, setSpotPrice] = useState(null);
+  const [companions, setCompanions] = useState([]);
   const [execId, setExecId] = useState(null);
   const [funds, setFunds] = useState(null);
   const [margin, setMargin] = useState({
@@ -187,6 +189,7 @@ export default function App() {
             <div className="chart-column">
               {chainActive && selectedIndex && (
                 <>
+                  <IndexQuotes items={companions} />
                   <div className="panel trade-note-box">
                     <div className="trade-note-title">
                       {selectedIndex === "SENSEX" ? "SENSEX" : "NIFTY"} Trade Parameters
@@ -215,6 +218,7 @@ export default function App() {
                   indexId={selectedIndex}
                   onAdd={openModal}
                   onSpotUpdate={setSpotPrice}
+                  onCompanionUpdate={setCompanions}
                 />
               )}
             </div>
