@@ -103,13 +103,11 @@ ORPHAN_TIMEOUT_SECS = 30 * 60
 COMPANION_INDICES = {
     "NIFTY": [
         {"key": "NSE_INDEX|Nifty 50", "label": "NIFTY 50"},
-        {"key": "GLOBAL_INDEX|SGX+NIFTY", "label": "SGX NIFTY"},
         {"key": "NSE_INDEX|India VIX", "label": "INDIA VIX"},
     ],
     "SENSEX": [
         {"key": "BSE_INDEX|SENSEX", "label": "SENSEX"},
         {"key": "NSE_INDEX|Nifty 50", "label": "NIFTY 50"},
-        {"key": "GLOBAL_INDEX|SGX+NIFTY", "label": "SGX NIFTY"},
         {"key": "NSE_INDEX|India VIX", "label": "INDIA VIX"},
     ],
 }
