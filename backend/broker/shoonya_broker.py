@@ -12,7 +12,9 @@ from typing import Callable
 
 import concurrent.futures
 import time
+from functools import lru_cache
 
+import pandas as pd
 import pyotp
 import requests
 import NorenRestApiPy.NorenApi as _noren_module
@@ -47,6 +49,30 @@ MONTH_ABBR = {
 log = logging.getLogger("shoonya")
 
 SESSION_CACHE = Path(tempfile.gettempdir()) / ".shoonya_session_cache"
+_EXPIRY_FMT = "%d-%b-%Y"
+
+
+@lru_cache(maxsize=16)
+def _load_symbols_df(index_name: str, file_mtime: float) -> pd.DataFrame | None:
+    """Load and filter the Shoonya symbols file for a given index.
+
+    file_mtime is part of the cache key so the DataFrame refreshes
+    when the file is re-downloaded.
+    """
+    cfg = ShoonyaBroker.INDEX_CONFIG.get(index_name)
+    if cfg is None:
+        return None
+    prefix = cfg["options_exchange"]
+    path = Path(tempfile.gettempdir()) / f"{prefix}_symbols.txt"
+    if not path.exists():
+        return None
+    df = pd.read_csv(path)
+    df = df[
+        (df["Symbol"].isin(cfg["symbol_names"]))
+        & (df["Instrument"] == cfg["instrument_type"])
+    ]
+    df["StrikePrice"] = pd.to_numeric(df["StrikePrice"], errors="coerce")
+    return df
 
 
 class _ShoonyaApi(NorenApi):
@@ -139,8 +165,46 @@ class ShoonyaBroker(BrokerInterface):
 
     # ── Symbol building ────────────────────────────────────────────
 
+    def _lookup_symbol(self, index_name: str, expiry: date,
+                       strike: float, option_type: str) -> str | None:
+        """Look up the exact TradingSymbol from Shoonya's symbols file."""
+        cfg = self.INDEX_CONFIG.get(index_name)
+        if cfg is None:
+            return None
+        prefix = cfg["options_exchange"]
+        path = Path(tempfile.gettempdir()) / f"{prefix}_symbols.txt"
+        if not path.exists():
+            return None
+
+        df = _load_symbols_df(index_name, path.stat().st_mtime)
+        if df is None or df.empty:
+            return None
+
+        expiry_str = expiry.strftime(_EXPIRY_FMT).upper()
+
+        ot = option_type.upper()
+        if len(ot) == 1:
+            ot = "CE" if ot == "C" else "PE"
+
+        match = df[
+            (df["Expiry"].str.strip().str.upper() == expiry_str)
+            & (df["StrikePrice"] == strike)
+            & (df["OptionType"] == ot)
+        ]
+        if not match.empty:
+            symbol = match["TradingSymbol"].values[0]
+            log.debug("Symbol lookup hit: %s → %s", (index_name, expiry, strike, ot), symbol)
+            return symbol
+        return None
+
     def build_trading_symbol(self, index_name: str, expiry: date,
                               strike: float, option_type: str) -> str:
+        looked_up = self._lookup_symbol(index_name, expiry, strike, option_type)
+        if looked_up:
+            return looked_up
+
+        log.warning("Symbol lookup miss for %s %s %s %s — falling back to constructed symbol",
+                    index_name, expiry, strike, option_type)
         prefix = self.SYMBOL_PREFIX.get(index_name, index_name)
         dd = f"{expiry.day:02d}"
         mon = MONTH_ABBR[expiry.month]
