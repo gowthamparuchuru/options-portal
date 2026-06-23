@@ -1,15 +1,18 @@
+from __future__ import annotations
+
 import calendar as _calendar
-import logging
 import json
+import logging
 import asyncio
 import time
 from datetime import datetime, time as dtime, timedelta
 from threading import Lock
 
-import pandas as pd
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 
 from ..broker.shoonya_broker import ShoonyaBroker
+from ..broker.upstox_broker import UpstoxBroker
+
 router = APIRouter()
 log = logging.getLogger("options")
 
@@ -22,33 +25,21 @@ async def list_indices():
     ]
 
 
-def _previous_trading_day(d) -> "date":
-    """Step back to the most recent weekday (skips Sat/Sun)."""
-    d = d - timedelta(days=1)
-    while d.weekday() >= 5:
-        d -= timedelta(days=1)
-    return d
-
-
 @router.get("/candles/{index_id}")
 async def get_candles(index_id: str, request: Request):
-    margin_broker = request.app.state.margin_broker
-    if margin_broker is None:
-        return {"error": "Zerodha not configured — chart unavailable"}
+    upstox: UpstoxBroker | None = request.app.state.upstox_broker
+    if upstox is None:
+        return {"error": "Upstox not configured — chart unavailable"}
 
-    SUPPORTED = {"NIFTY", "SENSEX"}
-    if index_id not in SUPPORTED:
+    if index_id not in UpstoxBroker.INDEX_CONFIG:
         return {"error": f"Unknown index: {index_id}"}
 
     now = datetime.now()
-    prev_day = _previous_trading_day(now.date())
     market_open = dtime(hour=9, minute=15)
-    from_dt = datetime.combine(prev_day, market_open)
+    from_dt = datetime.combine(now.date() - timedelta(days=5), market_open)
     to_dt = now
 
-    candles = margin_broker.get_historical_candles(
-        index_id, from_dt, to_dt, "15minute"
-    )
+    candles = upstox.get_historical_candles(index_id, from_dt, to_dt, unit="minutes", interval=15)
 
     if not candles:
         return {"error": "No candle data available"}
@@ -72,91 +63,155 @@ async def get_candles(index_id: str, request: Request):
 @router.get("/chain/{index_id}")
 async def get_option_chain_snapshot(index_id: str, request: Request):
     """REST endpoint: returns a one-time snapshot of the option chain."""
+    upstox: UpstoxBroker | None = request.app.state.upstox_broker
     broker: ShoonyaBroker = request.app.state.broker
-    if not broker.is_logged_in():
-        return {"error": "Not authenticated"}
 
-    idx_cfg = ShoonyaBroker.INDEX_CONFIG.get(index_id)
-    if not idx_cfg:
+    if upstox is None:
+        return {"error": "Upstox not configured"}
+
+    cfg = UpstoxBroker.INDEX_CONFIG.get(index_id)
+    if not cfg:
         return {"error": f"Unknown index: {index_id}"}
 
-    symbols_path = broker.download_symbols(idx_cfg["symbols_url"], idx_cfg["options_exchange"])
-    df = pd.read_csv(symbols_path)
-    df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
+    expiry = upstox.get_nearest_expiry(index_id)
+    if not expiry:
+        return {"error": "Could not determine nearest expiry"}
 
-    from datetime import datetime
-    today_exp = datetime.now().strftime("%d-%b-%Y").upper()
-
-    options_df = df[
-        (df["Symbol"].isin(idx_cfg["symbol_names"]))
-        & (df["Instrument"] == idx_cfg["instrument_type"])
-        & (df["Expiry"] == today_exp)
-    ].copy()
-
-    if options_df.empty:
-        all_expiries = df[
-            (df["Symbol"].isin(idx_cfg["symbol_names"]))
-            & (df["Instrument"] == idx_cfg["instrument_type"])
-        ]["Expiry"].unique()
-        nearest = sorted(all_expiries)[0] if len(all_expiries) else None
-        if nearest:
-            options_df = df[
-                (df["Symbol"].isin(idx_cfg["symbol_names"]))
-                & (df["Instrument"] == idx_cfg["instrument_type"])
-                & (df["Expiry"] == nearest)
-            ].copy()
-            today_exp = nearest
-
-    spot = broker.get_spot_price(idx_cfg["spot_exchange"], idx_cfg["spot_token"])
+    spot = upstox.get_ltp(cfg["instrument_key"])
     if spot is None:
         return {"error": "Failed to fetch spot price"}
 
-    chain = broker.get_option_chain_tokens(options_df, spot, 3.0)
+    chain = upstox.get_option_chain_data(index_id, expiry, spot, range_pct=3.5)
     if not chain:
         return {"error": "No strikes found in range"}
 
-    chain["spot_price"] = spot
-    chain["index"] = index_id
-    chain["expiry"] = today_exp
-    chain["exchange"] = idx_cfg["options_exchange"]
+    expiry_date = datetime.strptime(expiry, "%Y-%m-%d").date()
+    for strike_data in chain["strikes"].values():
+        strike = strike_data["strike"]
+        strike_data["ce_symbol"] = broker.build_trading_symbol(
+            index_id, expiry_date, strike, "CE",
+        )
+        strike_data["pe_symbol"] = broker.build_trading_symbol(
+            index_id, expiry_date, strike, "PE",
+        )
+
     return chain
 
 
 ORPHAN_TIMEOUT_SECS = 30 * 60
 
+COMPANION_INDICES = {
+    "NIFTY": [
+        {"key": "NSE_INDEX|Nifty 50", "label": "NIFTY 50"},
+        {"key": "NSE_INDEX|India VIX", "label": "INDIA VIX"},
+    ],
+    "SENSEX": [
+        {"key": "BSE_INDEX|SENSEX", "label": "SENSEX"},
+        {"key": "NSE_INDEX|Nifty 50", "label": "NIFTY 50"},
+        {"key": "NSE_INDEX|India VIX", "label": "INDIA VIX"},
+    ],
+}
+
 
 class _LiveFeed:
-    """Manages one Shoonya WS connection and fans out ticks to browser clients."""
+    """Manages one Upstox MarketDataStreamerV3 and fans ticks to browser clients."""
 
     def __init__(self):
         self.lock = Lock()
         self.prices: dict[str, float] = {}
+        self.closes: dict[str, float] = {}
         self.connected = False
         self._started = False
         self._client_count = 0
         self._last_client_left: float | None = None
-        self._broker: ShoonyaBroker | None = None
+        self._streamer = None
+        self._upstox: UpstoxBroker | None = None
 
-    def on_tick(self, tick):
-        tk = tick.get("tk")
-        lp = tick.get("lp")
-        if tk and lp:
-            with self.lock:
-                self.prices[tk] = float(lp)
+    def _on_message(self, message):
+        if isinstance(message, str):
+            try:
+                data = json.loads(message)
+            except (json.JSONDecodeError, TypeError):
+                return
+        elif isinstance(message, dict):
+            data = message
+        else:
+            return
 
-    def on_open(self):
+        if data.get("type") != "live_feed":
+            return
+
+        prices, closes = {}, {}
+        for inst_key, payload in data.get("feeds", {}).items():
+            ltpc = payload.get("ltpc") or payload.get("ff", {}).get("ltpc")
+            if not ltpc:
+                ff = payload.get("ff", {})
+                ltpc = (ff.get("eFeedDetails") or ff.get("marketFF") or {}).get("ltpc")
+            if ltpc:
+                ltp = ltpc.get("ltp")
+                if ltp is not None:
+                    prices[inst_key] = float(ltp)
+                cp = ltpc.get("cp")
+                if cp is not None:
+                    closes[inst_key] = float(cp)
+
+        with self.lock:
+            if prices:
+                self.prices.update(prices)
+            if closes:
+                self.closes.update(closes)
+
+    def _on_open(self):
         with self.lock:
             self.connected = True
-        log.info("Shoonya WS connected")
+        log.info("Upstox WS connected")
 
-    def on_close(self):
+    def _on_close(self):
         with self.lock:
             self.connected = False
-        log.warning("Shoonya WS disconnected")
+        log.warning("Upstox WS disconnected")
+
+    def _on_error(self, error):
+        log.error("Upstox WS error: %s", error)
+
+    def start(self, upstox: UpstoxBroker, instrument_keys: list[str]):
+        with self.lock:
+            if self._started:
+                return
+            self._upstox = upstox
+
+        streamer = upstox.create_streamer(instrument_keys, "ltpc")
+        streamer.on("message", self._on_message)
+        streamer.on("open", self._on_open)
+        streamer.on("close", self._on_close)
+        streamer.on("error", self._on_error)
+        streamer.auto_reconnect(True, 5, 50)
+
+        with self.lock:
+            self._streamer = streamer
+            self._started = True
+
+        streamer.connect()
+        log.info("Upstox WS streamer started with %d instruments", len(instrument_keys))
+
+    def subscribe(self, instrument_keys: list[str]):
+        with self.lock:
+            streamer = self._streamer
+            is_connected = self.connected
+        if streamer and is_connected:
+            try:
+                streamer.subscribe(instrument_keys, "ltpc")
+                log.debug("Subscribed to %d additional instruments", len(instrument_keys))
+            except Exception:
+                log.exception("Failed to subscribe to instruments")
 
     def snapshot(self) -> dict:
         with self.lock:
             return dict(self.prices)
+
+    def snapshot_closes(self) -> dict:
+        with self.lock:
+            return dict(self.closes)
 
     def add_client(self):
         with self.lock:
@@ -184,26 +239,31 @@ class _LiveFeed:
         with self.lock:
             if not self._started:
                 return
-            broker = self._broker
+            streamer = self._streamer
             self._started = False
             self.connected = False
             self.prices.clear()
-            self._broker = None
+            self.closes.clear()
+            self._streamer = None
+            self._upstox = None
             self._last_client_left = None
-        if broker:
-            log.info("Stopping Shoonya WS feed")
-            broker.stop_websocket()
+        if streamer:
+            log.info("Stopping Upstox WS feed")
+            try:
+                streamer.disconnect()
+            except Exception:
+                log.exception("Error disconnecting Upstox WS")
 
 
 _feed = _LiveFeed()
 
 
 async def run_orphan_watcher():
-    """Background task: closes Shoonya WS if no browser clients for 30 min."""
+    """Background task: closes Upstox WS if no browser clients for 30 min."""
     while True:
         await asyncio.sleep(60)
         if _feed.is_orphaned():
-            log.info("Shoonya WS orphaned for >%d min — shutting down",
+            log.info("Upstox WS orphaned for >%d min — shutting down",
                      ORPHAN_TIMEOUT_SECS // 60)
             _feed.shutdown()
 
@@ -211,93 +271,122 @@ async def run_orphan_watcher():
 @router.websocket("/ws/{index_id}")
 async def option_chain_ws(ws: WebSocket, index_id: str):
     await ws.accept()
+    upstox: UpstoxBroker | None = ws.app.state.upstox_broker
     broker: ShoonyaBroker = ws.app.state.broker
 
-    if not broker.is_logged_in():
-        await ws.send_json({"type": "error", "message": "Not authenticated"})
+    if upstox is None:
+        await ws.send_json({"type": "error", "message": "Upstox not configured"})
         await ws.close()
         return
 
-    idx_cfg = ShoonyaBroker.INDEX_CONFIG.get(index_id)
-    if not idx_cfg:
+    cfg = UpstoxBroker.INDEX_CONFIG.get(index_id)
+    if not cfg:
         await ws.send_json({"type": "error", "message": f"Unknown index: {index_id}"})
         await ws.close()
         return
 
-    symbols_path = broker.download_symbols(idx_cfg["symbols_url"], idx_cfg["options_exchange"])
-    df = pd.read_csv(symbols_path)
-    df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
+    expiry = upstox.get_nearest_expiry(index_id)
+    if not expiry:
+        await ws.send_json({"type": "error", "message": "Could not determine nearest expiry"})
+        await ws.close()
+        return
 
-    from datetime import datetime
-    today_exp = datetime.now().strftime("%d-%b-%Y").upper()
-
-    options_df = df[
-        (df["Symbol"].isin(idx_cfg["symbol_names"]))
-        & (df["Instrument"] == idx_cfg["instrument_type"])
-        & (df["Expiry"] == today_exp)
-    ].copy()
-
-    if options_df.empty:
-        all_expiries = df[
-            (df["Symbol"].isin(idx_cfg["symbol_names"]))
-            & (df["Instrument"] == idx_cfg["instrument_type"])
-        ]["Expiry"].unique()
-        nearest = sorted(all_expiries)[0] if len(all_expiries) else None
-        if nearest:
-            options_df = df[
-                (df["Symbol"].isin(idx_cfg["symbol_names"]))
-                & (df["Instrument"] == idx_cfg["instrument_type"])
-                & (df["Expiry"] == nearest)
-            ].copy()
-            today_exp = nearest
-
-    spot = broker.get_spot_price(idx_cfg["spot_exchange"], idx_cfg["spot_token"])
+    spot = upstox.get_ltp(cfg["instrument_key"])
     if spot is None:
         await ws.send_json({"type": "error", "message": "Failed to get spot price"})
         await ws.close()
         return
 
-    chain = broker.get_option_chain_tokens(options_df, spot, 3.0)
+    chain = upstox.get_option_chain_data(index_id, expiry, spot, range_pct=3.5)
     if not chain:
         await ws.send_json({"type": "error", "message": "No strikes in range"})
         await ws.close()
         return
 
-    tokens_to_sub = [f"{idx_cfg['spot_exchange']}|{idx_cfg['spot_token']}"]
+    expiry_date = datetime.strptime(expiry, "%Y-%m-%d").date()
+    for strike_data in chain["strikes"].values():
+        strike = strike_data["strike"]
+        strike_data["ce_symbol"] = broker.build_trading_symbol(
+            index_id, expiry_date, strike, "CE",
+        )
+        strike_data["pe_symbol"] = broker.build_trading_symbol(
+            index_id, expiry_date, strike, "PE",
+        )
+
+    tokens_to_sub = [cfg["instrument_key"]]
     for s_data in chain["strikes"].values():
         if s_data["ce_token"]:
-            tokens_to_sub.append(f"{idx_cfg['options_exchange']}|{s_data['ce_token']}")
+            tokens_to_sub.append(s_data["ce_token"])
         if s_data["pe_token"]:
-            tokens_to_sub.append(f"{idx_cfg['options_exchange']}|{s_data['pe_token']}")
+            tokens_to_sub.append(s_data["pe_token"])
+
+    companion_defs = COMPANION_INDICES.get(index_id, [])
+    companion_keys = [ci["key"] for ci in companion_defs]
+    for k in companion_keys:
+        if k not in tokens_to_sub:
+            tokens_to_sub.append(k)
+
+    companion_ltps = upstox.get_ltp_batch(companion_keys) if companion_keys else {}
 
     if not _feed._started:
-        _feed._broker = broker
-        broker.start_websocket(_feed.on_tick, _feed.on_open, _feed.on_close)
-        _feed._started = True
-        await asyncio.sleep(2)
+        _feed.start(upstox, tokens_to_sub)
+        await asyncio.sleep(3)
+    else:
+        _feed.subscribe(tokens_to_sub)
 
-    broker.subscribe(tokens_to_sub)
+    spot_key = cfg["instrument_key"]
+
+    companion_init = []
+    for ci in companion_defs:
+        companion_init.append({
+            "key": ci["key"],
+            "label": ci["label"],
+            "price": companion_ltps.get(ci["key"]),
+            "change": None,
+        })
 
     await ws.send_json({
         "type": "init",
         "spot_price": spot,
-        "expiry": today_exp,
-        "exchange": idx_cfg["options_exchange"],
-        "spot_token": idx_cfg["spot_token"],
+        "expiry": expiry,
+        "exchange": cfg["shoonya_exchange"],
+        "spot_token": spot_key,
         "strikes": chain["strikes"],
         "atm": chain["atm"],
+        "companion": companion_init,
     })
 
     _feed.add_client()
     try:
         while True:
             prices = _feed.snapshot()
-            spot_now = prices.get(idx_cfg["spot_token"], spot)
-            await ws.send_json({"type": "tick", "prices": prices, "spot": spot_now})
+            closes = _feed.snapshot_closes()
+            spot_now = prices.get(spot_key, spot)
+
+            companion_tick = []
+            for ci in companion_defs:
+                ltp = prices.get(ci["key"])
+                cp = closes.get(ci["key"])
+                change = None
+                if ltp is not None and cp is not None and cp > 0:
+                    change = round(((ltp - cp) / cp) * 100, 2)
+                companion_tick.append({
+                    "key": ci["key"],
+                    "label": ci["label"],
+                    "price": ltp,
+                    "change": change,
+                })
+
+            await ws.send_json({
+                "type": "tick",
+                "prices": prices,
+                "spot": spot_now,
+                "companion": companion_tick,
+            })
             await asyncio.sleep(0.5)
     except WebSocketDisconnect:
         log.info("Browser WS disconnected")
-    except Exception as e:
+    except Exception:
         log.exception("WS error")
     finally:
         _feed.remove_client()

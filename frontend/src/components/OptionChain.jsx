@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 
-export default function OptionChain({ indexId, onAdd, onSpotUpdate }) {
+export default function OptionChain({ indexId, onAdd, onSpotUpdate, onCompanionUpdate }) {
   const [data, setData] = useState(null);
   const [prices, setPrices] = useState({});
   const [spot, setSpot] = useState(0);
@@ -31,6 +31,7 @@ export default function OptionChain({ indexId, onAdd, onSpotUpdate }) {
         setData(msg);
         setSpot(msg.spot_price);
         if (onSpotUpdate) onSpotUpdate(msg.spot_price);
+        if (onCompanionUpdate && msg.companion) onCompanionUpdate(msg.companion);
       }
       if (msg.type === "tick") {
         setPrices(msg.prices);
@@ -38,6 +39,7 @@ export default function OptionChain({ indexId, onAdd, onSpotUpdate }) {
           setSpot(msg.spot);
           if (onSpotUpdate) onSpotUpdate(msg.spot);
         }
+        if (onCompanionUpdate && msg.companion) onCompanionUpdate(msg.companion);
       }
     };
 

@@ -11,13 +11,31 @@ from pathlib import Path
 from typing import Callable
 
 import concurrent.futures
+import time
+from functools import lru_cache
 
+import pandas as pd
 import pyotp
 import requests
+import NorenRestApiPy.NorenApi as _noren_module
 from NorenRestApiPy.NorenApi import NorenApi
 from playwright.sync_api import sync_playwright
 
 from .interface import BrokerInterface, ProductType, OrderType, TransactionType
+
+
+def _patched_post(url, data=None, **kwargs):
+    """Move jKey from body into Authorization header (new Shoonya REST API requirement)."""
+    if isinstance(data, str) and "&jKey=" in data:
+        body, _, jkey = data.partition("&jKey=")
+        kwargs.setdefault("headers", {})["Authorization"] = f"Bearer {jkey}"
+        data = body
+    return requests._original_post(url, data=data, **kwargs)
+
+
+if not hasattr(requests, "_original_post"):
+    requests._original_post = requests.post
+_noren_module.requests.post = _patched_post
 
 OAUTH_LOGIN_URL = "https://trade.shoonya.com/OAuthlogin/authorize/oauth?client_id={client_id}_U"
 OAUTH_REDIRECT_PREFIX = "https://trade.shoonya.com/OAuthlogin"
@@ -31,12 +49,36 @@ MONTH_ABBR = {
 log = logging.getLogger("shoonya")
 
 SESSION_CACHE = Path(tempfile.gettempdir()) / ".shoonya_session_cache"
+_EXPIRY_FMT = "%d-%b-%Y"
+
+
+@lru_cache(maxsize=16)
+def _load_symbols_df(index_name: str, file_mtime: float) -> pd.DataFrame | None:
+    """Load and filter the Shoonya symbols file for a given index.
+
+    file_mtime is part of the cache key so the DataFrame refreshes
+    when the file is re-downloaded.
+    """
+    cfg = ShoonyaBroker.INDEX_CONFIG.get(index_name)
+    if cfg is None:
+        return None
+    prefix = cfg["options_exchange"]
+    path = Path(tempfile.gettempdir()) / f"{prefix}_symbols.txt"
+    if not path.exists():
+        return None
+    df = pd.read_csv(path)
+    df = df[
+        (df["Symbol"].isin(cfg["symbol_names"]))
+        & (df["Instrument"] == cfg["instrument_type"])
+    ]
+    df["StrikePrice"] = pd.to_numeric(df["StrikePrice"], errors="coerce")
+    return df
 
 
 class _ShoonyaApi(NorenApi):
     def __init__(self):
         super().__init__(
-            host="https://api.shoonya.com/NorenWClientTP/",
+            host="https://api.shoonya.com/NorenWClientAPI",
             websocket="wss://api.shoonya.com/NorenWSTP/",
         )
 
@@ -94,10 +136,75 @@ class ShoonyaBroker(BrokerInterface):
         self._api = _ShoonyaApi()
         self._logged_in = False
 
+    def _retry_api(self, api_call, *args, max_retries=3, retry_on_none=True, **kwargs):
+        """Call a Shoonya API method with retries and exponential backoff."""
+        last_exc = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                result = api_call(*args, **kwargs)
+                if result is not None or not retry_on_none:
+                    return result
+                if attempt < max_retries:
+                    wait = 0.5 * (2 ** (attempt - 1))
+                    log.warning("Shoonya %s returned None, retry %d/%d in %.1fs",
+                                api_call.__name__, attempt, max_retries, wait)
+                    time.sleep(wait)
+            except Exception as e:
+                last_exc = e
+                if attempt < max_retries:
+                    wait = 0.5 * (2 ** (attempt - 1))
+                    log.warning("Shoonya %s failed: %s, retry %d/%d in %.1fs",
+                                api_call.__name__, e, attempt, max_retries, wait)
+                    time.sleep(wait)
+                else:
+                    log.error("Shoonya %s failed after %d attempts: %s",
+                              api_call.__name__, max_retries, e)
+        if last_exc:
+            raise last_exc
+        return None
+
     # ── Symbol building ────────────────────────────────────────────
+
+    def _lookup_symbol(self, index_name: str, expiry: date,
+                       strike: float, option_type: str) -> str | None:
+        """Look up the exact TradingSymbol from Shoonya's symbols file."""
+        cfg = self.INDEX_CONFIG.get(index_name)
+        if cfg is None:
+            return None
+        prefix = cfg["options_exchange"]
+        path = Path(tempfile.gettempdir()) / f"{prefix}_symbols.txt"
+        if not path.exists():
+            return None
+
+        df = _load_symbols_df(index_name, path.stat().st_mtime)
+        if df is None or df.empty:
+            return None
+
+        expiry_str = expiry.strftime(_EXPIRY_FMT).upper()
+
+        ot = option_type.upper()
+        if len(ot) == 1:
+            ot = "CE" if ot == "C" else "PE"
+
+        match = df[
+            (df["Expiry"].str.strip().str.upper() == expiry_str)
+            & (df["StrikePrice"] == strike)
+            & (df["OptionType"] == ot)
+        ]
+        if not match.empty:
+            symbol = match["TradingSymbol"].values[0]
+            log.debug("Symbol lookup hit: %s → %s", (index_name, expiry, strike, ot), symbol)
+            return symbol
+        return None
 
     def build_trading_symbol(self, index_name: str, expiry: date,
                               strike: float, option_type: str) -> str:
+        looked_up = self._lookup_symbol(index_name, expiry, strike, option_type)
+        if looked_up:
+            return looked_up
+
+        log.warning("Symbol lookup miss for %s %s %s %s — falling back to constructed symbol",
+                    index_name, expiry, strike, option_type)
         prefix = self.SYMBOL_PREFIX.get(index_name, index_name)
         dd = f"{expiry.day:02d}"
         mon = MONTH_ABBR[expiry.month]
@@ -130,7 +237,7 @@ class ShoonyaBroker(BrokerInterface):
                 password=self._cfg["SHOONYA_PASSWORD"],
                 usertoken=cached,
             )
-            test = self._api.get_quotes(exchange="NSE", token="26000")
+            test = self._retry_api(self._api.get_quotes, exchange="NSE", token="26000")
             if test and test.get("stat") == "Ok":
                 self._logged_in = True
                 log.info("Login successful (cached session) for user: %s", user_id)
@@ -160,7 +267,7 @@ class ShoonyaBroker(BrokerInterface):
         user_id = self._cfg["SHOONYA_USER_ID"]
         password = self._cfg["SHOONYA_PASSWORD"]
         totp_secret = self._cfg["SHOONYA_TOTP_SECRET"]
-        oauth_secret = self._cfg["SHOONYA_OAUTH_SECRET"]
+        oauth_secret = self._cfg["SHOONYA_API_SECRET"]
 
         # Step 1-3: Browser automation to obtain OAuth code
         login_url = OAUTH_LOGIN_URL.format(client_id=user_id)
@@ -225,7 +332,7 @@ class ShoonyaBroker(BrokerInterface):
 
     def get_available_margin(self) -> dict | None:
         log.debug("Fetching available margin/funds from Shoonya")
-        resp = self._api.get_limits()
+        resp = self._retry_api(self._api.get_limits)
         if not resp or resp.get("stat") != "Ok":
             log.warning("get_limits failed: %s", resp)
             return None
@@ -246,7 +353,7 @@ class ShoonyaBroker(BrokerInterface):
 
     def get_spot_price(self, exchange: str, token: str) -> float | None:
         log.debug("Fetching spot price for %s|%s", exchange, token)
-        resp = self._api.get_quotes(exchange=exchange, token=token)
+        resp = self._retry_api(self._api.get_quotes, exchange=exchange, token=token)
         if resp and resp.get("stat") == "Ok":
             ltp = float(resp.get("lp", 0))
             if ltp > 0:
@@ -342,7 +449,8 @@ class ShoonyaBroker(BrokerInterface):
         log.info("Placing SELL order — symbol=%s qty=%d price=%.2f exchange=%s",
                  symbol, quantity, price, exchange)
         try:
-            resp = self._api.place_order(
+            resp = self._retry_api(
+                self._api.place_order,
                 buy_or_sell="S",
                 product_type=product_type,
                 exchange=exchange,
@@ -354,6 +462,7 @@ class ShoonyaBroker(BrokerInterface):
                 trigger_price=None,
                 retention="DAY",
                 remarks="portal_sell",
+                retry_on_none=False,
             )
             if resp is None:
                 log.error("Place order returned no response for %s", symbol)
@@ -376,13 +485,15 @@ class ShoonyaBroker(BrokerInterface):
         log.info("Modifying order — order_id=%s symbol=%s new_price=%.2f",
                  order_id, tradingsymbol, new_price)
         try:
-            resp = self._api.modify_order(
+            resp = self._retry_api(
+                self._api.modify_order,
                 orderno=order_id,
                 exchange=exchange,
                 tradingsymbol=tradingsymbol,
                 newquantity=quantity,
                 newprice_type="LMT",
                 newprice=new_price,
+                retry_on_none=False,
             )
             success = bool(resp and resp.get("stat") == "Ok")
             if success:
@@ -397,7 +508,7 @@ class ShoonyaBroker(BrokerInterface):
     def cancel_order(self, order_id: str) -> bool:
         log.info("Cancelling order — order_id=%s", order_id)
         try:
-            resp = self._api.cancel_order(orderno=order_id)
+            resp = self._retry_api(self._api.cancel_order, orderno=order_id, retry_on_none=False)
             success = bool(resp and resp.get("stat") == "Ok")
             if success:
                 log.info("Order %s cancelled successfully", order_id)
@@ -411,7 +522,7 @@ class ShoonyaBroker(BrokerInterface):
     def get_order_status(self, order_id: str) -> dict | None:
         log.debug("Fetching status for order %s", order_id)
         try:
-            resp = self._api.single_order_history(orderno=order_id)
+            resp = self._retry_api(self._api.single_order_history, orderno=order_id)
             if not resp or not isinstance(resp, list) or len(resp) == 0:
                 log.debug("No order history returned for %s", order_id)
                 return None

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import LoginStatus from "./components/LoginStatus";
+import LiveClock from "./components/LiveClock";
 import IndexSelector from "./components/IndexSelector";
 import OptionChain from "./components/OptionChain";
 import SpotChart from "./components/SpotChart";
@@ -7,9 +8,10 @@ import Basket from "./components/Basket";
 import LotModal from "./components/LotModal";
 import ConfirmModal from "./components/ConfirmModal";
 import OrderTracker from "./components/OrderTracker";
+import IndexQuotes from "./components/IndexQuotes";
 
 export default function App() {
-  const [auth, setAuth] = useState({ checked: false, ok: false, error: null });
+  const [brokerStatus, setBrokerStatus] = useState(null);
   const [selectedIndex, setSelectedIndex] = useState(null);
   const [chainActive, setChainActive] = useState(false);
   const [basket, setBasket] = useState([]);
@@ -17,6 +19,7 @@ export default function App() {
   const [editModal, setEditModal] = useState(null);
   const [showConfirm, setShowConfirm] = useState(false);
   const [spotPrice, setSpotPrice] = useState(null);
+  const [companions, setCompanions] = useState([]);
   const [execId, setExecId] = useState(null);
   const [funds, setFunds] = useState(null);
   const [margin, setMargin] = useState({
@@ -35,19 +38,17 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetch("/api/auth/status")
-      .then(async (r) => {
-        const d = await r.json();
-        if (r.ok && d.authenticated) {
-          setAuth({ checked: true, ok: true, error: null });
-          fetchFunds();
-        } else {
-          const reason = d.error || `Broker responded with HTTP ${r.status}`;
-          setAuth({ checked: true, ok: false, error: reason });
-        }
+    fetch("/api/auth/broker-status")
+      .then((r) => r.json())
+      .then((d) => {
+        setBrokerStatus(d);
+        if (d.shoonya?.ok) fetchFunds();
       })
-      .catch((e) =>
-        setAuth({ checked: true, ok: false, error: `Network error: ${e.message}` })
+      .catch(() =>
+        setBrokerStatus({
+          shoonya: { ok: false, error: "Network error" },
+          upstox: { ok: false, error: "Network error" },
+        })
       );
   }, [fetchFunds]);
 
@@ -152,17 +153,18 @@ export default function App() {
     <div className="app">
       <header className="header">
         <h1>Options Portal</h1>
-        <LoginStatus auth={auth} />
+        <LiveClock />
+        <LoginStatus brokerStatus={brokerStatus} />
       </header>
 
-      {auth.checked && !auth.ok && (
+      {brokerStatus && !brokerStatus.shoonya?.ok && (
         <div className="error-banner">
-          Shoonya broker login failed: {auth.error || "Unknown error"}. Trading
+          Shoonya broker login failed: {brokerStatus.shoonya?.error || "Unknown error"}. Trading
           features disabled.
         </div>
       )}
 
-      {auth.ok && (
+      {brokerStatus?.shoonya?.ok && (
         <main className="main">
           <div className="controls">
             <IndexSelector value={selectedIndex} onChange={setSelectedIndex} />
@@ -186,7 +188,27 @@ export default function App() {
           <div className="content-grid">
             <div className="chart-column">
               {chainActive && selectedIndex && (
-                <SpotChart indexId={selectedIndex} spotPrice={spotPrice} />
+                <>
+                  <IndexQuotes items={companions} />
+                  <div className="panel trade-note-box">
+                    <div className="trade-note-title">
+                      {selectedIndex === "SENSEX" ? "SENSEX" : "NIFTY"} Trade Parameters
+                    </div>
+                    <div className="trade-note-row">
+                      <span className="trade-note-label">Safe Variance</span>
+                      <span className="trade-note-value">
+                        {selectedIndex === "SENSEX" ? "3%" : "2.5%"}
+                      </span>
+                    </div>
+                    <div className="trade-note-row">
+                      <span className="trade-note-label">Premium Target</span>
+                      <span className="trade-note-value">
+                        {selectedIndex === "SENSEX" ? "₹2.5" : "₹1.5"}
+                      </span>
+                    </div>
+                  </div>
+                  <SpotChart indexId={selectedIndex} spotPrice={spotPrice} />
+                </>
               )}
             </div>
 
@@ -196,6 +218,7 @@ export default function App() {
                   indexId={selectedIndex}
                   onAdd={openModal}
                   onSpotUpdate={setSpotPrice}
+                  onCompanionUpdate={setCompanions}
                 />
               )}
             </div>

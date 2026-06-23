@@ -7,8 +7,5 @@ pyotp
 requests
 pandas
 NorenRestApiPy
-
-kiteconnect
-Click
-six
+upstox-python-sdk
 playwright
