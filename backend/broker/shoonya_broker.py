@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -19,7 +20,11 @@ import pyotp
 import requests
 import NorenRestApiPy.NorenApi as _noren_module
 from NorenRestApiPy.NorenApi import NorenApi
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import (
+    sync_playwright,
+    Error as PlaywrightError,
+    TimeoutError as PlaywrightTimeoutError,
+)
 
 from .interface import BrokerInterface, ProductType, OrderType, TransactionType
 
@@ -50,6 +55,61 @@ log = logging.getLogger("shoonya")
 
 SESSION_CACHE = Path(tempfile.gettempdir()) / ".shoonya_session_cache"
 _EXPIRY_FMT = "%d-%b-%Y"
+
+
+class OAuthBrowserError(RuntimeError):
+    """Raised when the headless OAuth browser flow fails.
+
+    Carries a clean human-readable message plus an optional base64 PNG data URL
+    of the login page captured at failure time, so the frontend can show the
+    user exactly what the login page displayed.
+    """
+
+    def __init__(self, message: str, screenshot: str | None = None):
+        super().__init__(message)
+        self.screenshot = screenshot
+
+
+# On-page elements Shoonya's login page uses to surface validation errors
+# (wrong password, invalid TOTP, locked account, captcha, etc.).
+_ERROR_SELECTORS = (
+    ".toast-message", ".toast-error", ".error", ".errmsg", ".err_msg",
+    ".alert-danger", ".alert", "[class*='error']", "[class*='Error']",
+)
+
+
+def _capture_page_screenshot(page) -> str | None:
+    """Return a base64 PNG data URL of the current page, or None on failure."""
+    try:
+        png = page.screenshot(full_page=True)
+        return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+    except Exception:
+        log.warning("Failed to capture login-failure screenshot", exc_info=True)
+        return None
+
+
+def _scrape_page_error(page) -> str | None:
+    """Extract any visible error/toast text the login page is showing."""
+    for sel in _ERROR_SELECTORS:
+        try:
+            for el in page.query_selector_all(sel):
+                if not el.is_visible():
+                    continue
+                txt = (el.inner_text() or "").strip()
+                if txt:
+                    return " ".join(txt.split())
+        except Exception:
+            continue
+    return None
+
+
+def _summarize_browser_error(exc: Exception) -> str:
+    """Turn a raw Playwright exception into a short, actionable reason."""
+    if isinstance(exc, PlaywrightTimeoutError):
+        return ("timed out after 30s waiting for the OAuth redirect — the login "
+                "was likely rejected (wrong password, invalid TOTP, or captcha)")
+    # First line only; Playwright appends a verbose multi-line log dump.
+    return str(exc).splitlines()[0].strip() or exc.__class__.__name__
 
 
 @lru_cache(maxsize=16)
@@ -250,7 +310,11 @@ class ShoonyaBroker(BrokerInterface):
             token = self._oauth_login()
         except Exception as exc:
             log.error("OAuth login failed for %s: %s", user_id, exc)
-            return {"ok": False, "error": str(exc)}
+            result = {"ok": False, "error": str(exc)}
+            screenshot = getattr(exc, "screenshot", None)
+            if screenshot:
+                result["screenshot"] = screenshot
+            return result
 
         log.debug("OAuth token obtained, establishing session for %s", user_id)
         self._api.set_session(
@@ -279,25 +343,36 @@ class ShoonyaBroker(BrokerInterface):
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
                 page = browser.new_page()
-                log.debug("Navigating to OAuth login page")
-                page.goto(login_url)
-                page.wait_for_load_state("networkidle")
+                try:
+                    log.debug("Navigating to OAuth login page")
+                    page.goto(login_url)
+                    page.wait_for_load_state("networkidle")
 
-                log.debug("Filling login credentials")
-                page.fill("#lgnusrid", user_id)
-                page.fill("#lgnpwd", password)
+                    log.debug("Filling login credentials")
+                    page.fill("#lgnusrid", user_id)
+                    page.fill("#lgnpwd", password)
 
-                totp = pyotp.TOTP(totp_secret).now()
-                log.debug("Generated TOTP, submitting login form")
-                page.fill("#lgnotp", totp)
+                    totp = pyotp.TOTP(totp_secret).now()
+                    log.debug("Generated TOTP, submitting login form")
+                    page.fill("#lgnotp", totp)
 
-                page.click(".lgnBtnClss")
-                log.debug("Waiting for OAuth redirect...")
-                page.wait_for_url(f"{OAUTH_REDIRECT_PREFIX}**code=**", timeout=30000)
-
-                url = page.url
-                browser.close()
-            return url
+                    page.click(".lgnBtnClss")
+                    log.debug("Waiting for OAuth redirect...")
+                    page.wait_for_url(f"{OAUTH_REDIRECT_PREFIX}**code=**", timeout=30000)
+                    return page.url
+                except PlaywrightError as exc:
+                    # Capture what the page actually shows BEFORE tearing the
+                    # browser down, so we surface the real cause instead of the
+                    # opaque "Target page ... has been closed" teardown error.
+                    current_url = page.url
+                    screenshot = _capture_page_screenshot(page)
+                    page_error = _scrape_page_error(page)
+                    reason = page_error or _summarize_browser_error(exc)
+                    log.error("OAuth browser automation failed (url=%s): %s",
+                              current_url, reason)
+                    raise OAuthBrowserError(reason, screenshot=screenshot) from exc
+                finally:
+                    browser.close()
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             redirect_url = executor.submit(_run_browser).result()

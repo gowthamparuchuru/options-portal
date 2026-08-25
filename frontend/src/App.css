@@ -102,6 +102,17 @@ body {
   font-size: 13px;
 }
 
+.error-screenshot {
+  display: block;
+  margin-top: 10px;
+  max-width: 480px;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--red);
+  border-radius: 4px;
+  cursor: zoom-in;
+}
+
 /* ── Main layout ──────────────────────────────────────── */
 .main {
   padding: 16px 24px;

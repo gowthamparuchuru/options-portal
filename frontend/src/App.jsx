@@ -159,8 +159,24 @@ export default function App() {
 
       {brokerStatus && !brokerStatus.shoonya?.ok && (
         <div className="error-banner">
-          Shoonya broker login failed: {brokerStatus.shoonya?.error || "Unknown error"}. Trading
-          features disabled.
+          <div>
+            Shoonya broker login failed: {brokerStatus.shoonya?.error || "Unknown error"}. Trading
+            features disabled.
+          </div>
+          {brokerStatus.shoonya?.screenshot && (
+            <a
+              href={brokerStatus.shoonya.screenshot}
+              target="_blank"
+              rel="noreferrer"
+              title="Open full-size login page screenshot"
+            >
+              <img
+                className="error-screenshot"
+                src={brokerStatus.shoonya.screenshot}
+                alt="Login page at time of failure"
+              />
+            </a>
+          )}
         </div>
       )}
 

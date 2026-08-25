@@ -16,12 +16,14 @@ async def broker_status(request: Request):
     # ── Shoonya ──────────────────────────────────────────
     shoonya_ok = False
     shoonya_error = None
+    shoonya_screenshot = None
     try:
         if not shoonya.is_logged_in():
             log.info("Shoonya not logged in — triggering login")
             result = shoonya.login()
             if not result["ok"]:
                 shoonya_error = result.get("error", "Login failed")
+                shoonya_screenshot = result.get("screenshot")
 
         if shoonya.is_logged_in():
             test = shoonya._retry_api(
@@ -56,7 +58,11 @@ async def broker_status(request: Request):
             upstox_error = str(e)
 
     return JSONResponse(content={
-        "shoonya": {"ok": shoonya_ok, "error": shoonya_error},
+        "shoonya": {
+            "ok": shoonya_ok,
+            "error": shoonya_error,
+            "screenshot": shoonya_screenshot,
+        },
         "upstox": {"ok": upstox_ok, "error": upstox_error},
     })
 
