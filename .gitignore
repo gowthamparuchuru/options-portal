@@ -5,6 +5,7 @@ dist/
 dumps/
 __pycache__/
 nohup.out
+login_screenshots/
 .idea/
 .idea/**
 .idea/*

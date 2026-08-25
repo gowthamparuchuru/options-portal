@@ -1,7 +1,9 @@
 import logging
 
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
+
+from ..broker.shoonya_broker import LOGIN_SCREENSHOT_DIR
 
 router = APIRouter()
 log = logging.getLogger("auth")
@@ -24,6 +26,8 @@ async def broker_status(request: Request):
             if not result["ok"]:
                 shoonya_error = result.get("error", "Login failed")
                 shoonya_screenshot = result.get("screenshot")
+                if shoonya_screenshot:
+                    shoonya_screenshot = f"/api/auth/login-screenshot/{shoonya_screenshot}"
 
         if shoonya.is_logged_in():
             test = shoonya._retry_api(
@@ -75,3 +79,15 @@ async def force_login(request: Request):
     if result["ok"]:
         return JSONResponse(content={"ok": True}, status_code=200)
     return JSONResponse(content={"ok": False, "error": result.get("error")}, status_code=503)
+
+
+@router.get("/login-screenshot/{filename}")
+async def login_screenshot(filename: str):
+    """Serve a saved OAuth-login-failure screenshot by filename."""
+    # Guard against path traversal — only serve plain PNG files from the dir.
+    if "/" in filename or "\\" in filename or not filename.endswith(".png"):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    path = (LOGIN_SCREENSHOT_DIR / filename).resolve()
+    if path.parent != LOGIN_SCREENSHOT_DIR.resolve() or not path.is_file():
+        raise HTTPException(status_code=404, detail="Screenshot not found")
+    return FileResponse(path, media_type="image/png")

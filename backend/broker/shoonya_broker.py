@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import logging
@@ -54,20 +53,22 @@ MONTH_ABBR = {
 log = logging.getLogger("shoonya")
 
 SESSION_CACHE = Path(tempfile.gettempdir()) / ".shoonya_session_cache"
+# Where OAuth-login failure screenshots are written (date+time stamped).
+LOGIN_SCREENSHOT_DIR = Path(__file__).resolve().parents[1] / "login_screenshots"
 _EXPIRY_FMT = "%d-%b-%Y"
 
 
 class OAuthBrowserError(RuntimeError):
     """Raised when the headless OAuth browser flow fails.
 
-    Carries a clean human-readable message plus an optional base64 PNG data URL
-    of the login page captured at failure time, so the frontend can show the
-    user exactly what the login page displayed.
+    Carries a clean human-readable message plus, when available, the filename of
+    a PNG screenshot of the login page captured at failure time (saved under
+    ``LOGIN_SCREENSHOT_DIR``), so the frontend can show what the page displayed.
     """
 
     def __init__(self, message: str, screenshot: str | None = None):
         super().__init__(message)
-        self.screenshot = screenshot
+        self.screenshot = screenshot  # saved PNG filename, or None
 
 
 # On-page elements Shoonya's login page uses to surface validation errors
@@ -78,11 +79,19 @@ _ERROR_SELECTORS = (
 )
 
 
-def _capture_page_screenshot(page) -> str | None:
-    """Return a base64 PNG data URL of the current page, or None on failure."""
+def _save_failure_screenshot(page) -> str | None:
+    """Screenshot the current page to LOGIN_SCREENSHOT_DIR.
+
+    Returns the saved filename (date+time stamped), or None on failure.
+    """
     try:
-        png = page.screenshot(full_page=True)
-        return "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+        LOGIN_SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+        fname = f"shoonya_login_failure_{datetime.now():%Y%m%d_%H%M%S}.png"
+        dest = LOGIN_SCREENSHOT_DIR / fname
+        page.screenshot(path=str(dest), full_page=True)
+        log.info("Saved login-failure screenshot: %s (%d bytes)",
+                 dest, dest.stat().st_size)
+        return fname
     except Exception:
         log.warning("Failed to capture login-failure screenshot", exc_info=True)
         return None
@@ -365,7 +374,7 @@ class ShoonyaBroker(BrokerInterface):
                     # browser down, so we surface the real cause instead of the
                     # opaque "Target page ... has been closed" teardown error.
                     current_url = page.url
-                    screenshot = _capture_page_screenshot(page)
+                    screenshot = _save_failure_screenshot(page)
                     page_error = _scrape_page_error(page)
                     reason = page_error or _summarize_browser_error(exc)
                     log.error("OAuth browser automation failed (url=%s): %s",
