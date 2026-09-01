@@ -425,6 +425,64 @@ class UpstoxBroker:
             "index": index_id,
         }
 
+    @staticmethod
+    def _market_ltp(side) -> float | None:
+        """Extract last-traded-price from a call/put option chain side, defensively."""
+        if side is None:
+            return None
+        md = getattr(side, "market_data", None)
+        if md is None:
+            return None
+        ltp = getattr(md, "ltp", None)
+        try:
+            return float(ltp) if ltp is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def get_chain_premiums(
+        self, index_id: str, expiry_date: str, spot_price: float, range_pct: float = 6.0,
+    ) -> list[dict]:
+        """Return per-strike CE/PE premiums (LTP) for strikes within range_pct of spot.
+
+        Each row: {strike, ce_ltp, pe_ltp, ce_key, pe_key}. LTP may be None when
+        the exchange has no trade/quote yet. Used by the strangle strategy to pick
+        strikes by premium.
+        """
+        cfg = self.INDEX_CONFIG.get(index_id)
+        if not cfg:
+            return []
+
+        try:
+            options_api = upstox_client.OptionsApi(self._make_api_client())
+            resp = options_api.get_put_call_option_chain(cfg["instrument_key"], expiry_date)
+            if resp.status != "success" or not resp.data:
+                log.error("Empty option chain for %s expiry=%s", index_id, expiry_date)
+                return []
+            chain_data = resp.data
+        except Exception:
+            log.exception("Upstox chain premium fetch failed for %s", index_id)
+            return []
+
+        lower = spot_price * (1 - range_pct / 100)
+        upper = spot_price * (1 + range_pct / 100)
+
+        rows: list[dict] = []
+        for item in chain_data:
+            sp = item.strike_price
+            if sp is None or sp < lower or sp > upper:
+                continue
+            rows.append({
+                "strike": float(sp),
+                "ce_ltp": self._market_ltp(item.call_options),
+                "pe_ltp": self._market_ltp(item.put_options),
+                "ce_key": item.call_options.instrument_key if item.call_options else None,
+                "pe_key": item.put_options.instrument_key if item.put_options else None,
+            })
+
+        rows.sort(key=lambda r: r["strike"])
+        log.debug("Fetched %d chain premium rows for %s expiry=%s", len(rows), index_id, expiry_date)
+        return rows
+
     # ── Margin calculation ────────────────────────────────────────
 
     def get_basket_margin(self, instruments: list[dict]) -> dict:
