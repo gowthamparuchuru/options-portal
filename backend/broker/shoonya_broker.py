@@ -282,6 +282,46 @@ class ShoonyaBroker(BrokerInterface):
         strike_str = str(int(strike)) if strike == int(strike) else str(strike)
         return f"{prefix}{dd}{mon}{yy}{ot}{strike_str}"
 
+    def lookup_option(self, index_name: str, expiry: date,
+                      strike: float, option_type: str) -> dict | None:
+        """Resolve a specific option to its Shoonya order fields.
+
+        Returns {symbol, token, lot_size, exchange} from the cached symbols
+        file, or None if the symbols file is missing or the contract is absent.
+        """
+        cfg = self.INDEX_CONFIG.get(index_name)
+        if cfg is None:
+            return None
+        path = Path(tempfile.gettempdir()) / f'{cfg["options_exchange"]}_symbols.txt'
+        if not path.exists():
+            return None
+
+        df = _load_symbols_df(index_name, path.stat().st_mtime)
+        if df is None or df.empty:
+            return None
+
+        expiry_str = expiry.strftime(_EXPIRY_FMT).upper()
+        ot = option_type.upper()
+        if len(ot) == 1:
+            ot = "CE" if ot == "C" else "PE"
+
+        match = df[
+            (df["Expiry"].str.strip().str.upper() == expiry_str)
+            & (df["StrikePrice"] == strike)
+            & (df["OptionType"] == ot)
+        ]
+        if match.empty:
+            log.warning("lookup_option miss: %s %s %s %s", index_name, expiry_str, strike, ot)
+            return None
+
+        row = match.iloc[0]
+        return {
+            "symbol": str(row["TradingSymbol"]),
+            "token": str(row["Token"]),
+            "lot_size": int(row["LotSize"]),
+            "exchange": cfg["options_exchange"],
+        }
+
     # ── Enum resolution ────────────────────────────────────────────
 
     def resolve_product_type(self, product_type: ProductType) -> str:

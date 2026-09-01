@@ -19,6 +19,11 @@ UPSTOX_ENV_VARS = [
     "UPSTOX_PIN",
 ]
 
+TELEGRAM_ENV_VARS = [
+    "TELEGRAM_BOT_TOKEN",
+    "TELEGRAM_CHAT_ID",
+]
+
 
 def load_config() -> dict:
     """Load broker credentials from .env in project root."""
@@ -50,6 +55,11 @@ def load_config() -> dict:
         else:
             config[var] = val
 
+    for var in TELEGRAM_ENV_VARS:
+        val = os.getenv(var)
+        if val and not val.startswith("your_"):
+            config[var] = val
+
     if missing_upstox:
         raise RuntimeError(f"Missing Upstox env vars: {', '.join(missing_upstox)}")
 
@@ -58,3 +68,7 @@ def load_config() -> dict:
 
 def has_upstox_config(config: dict) -> bool:
     return all(var in config for var in UPSTOX_ENV_VARS)
+
+
+def has_telegram_config(config: dict) -> bool:
+    return all(var in config for var in TELEGRAM_ENV_VARS)
