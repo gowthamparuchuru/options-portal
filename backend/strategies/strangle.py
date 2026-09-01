@@ -41,6 +41,7 @@ from ..config import load_config, has_upstox_config
 from ..broker.shoonya_broker import ShoonyaBroker
 from ..broker.upstox_broker import UpstoxBroker
 from .selection import select_strangle_legs
+from ..notify import TelegramNotifier
 
 log = logging.getLogger("strangle")
 
@@ -184,7 +185,7 @@ def _leg_ltp(broker: ShoonyaBroker, upstox: UpstoxBroker, leg: dict) -> float | 
 
 
 async def chase_sell(broker: ShoonyaBroker, upstox: UpstoxBroker, leg: dict,
-                     product_type: str, dry_run: bool) -> dict:
+                     product_type: str, dry_run: bool, notifier: TelegramNotifier) -> dict:
     sym = leg["symbol"]
     qty = leg["qty"]
     exchange = leg["exchange"]
@@ -196,12 +197,15 @@ async def chase_sell(broker: ShoonyaBroker, upstox: UpstoxBroker, leg: dict,
     if ltp is None:
         log.error("Could not fetch LTP for %s — aborting leg", sym)
         result.update(status="FAILED", error="Could not fetch LTP")
+        await asyncio.to_thread(notifier.send, f"❌ Trade failed: {sym} — could not fetch LTP")
         return result
 
     if dry_run:
         log.info("[DRY-RUN] would SELL %s qty=%d near LTP=%.2f (product=%s)",
                  sym, qty, ltp, product_type)
         result.update(status="DRY_RUN", avg_price=ltp)
+        await asyncio.to_thread(notifier.send,
+                                f"🧪 [DRY-RUN] would SELL {sym} x{qty} near {ltp:.2f}")
         return result
 
     order_id = None
@@ -219,7 +223,9 @@ async def chase_sell(broker: ShoonyaBroker, upstox: UpstoxBroker, leg: dict,
                     broker.place_sell_order, exchange, leg["token"], sym, qty, price, product_type)
                 if res["status"] == "FAILED":
                     log.error("SELL failed for %s: %s", sym, res.get("error"))
-                    result.update(status="FAILED", error=res.get("error", "Place failed"))
+                    err = res.get("error", "Place failed")
+                    result.update(status="FAILED", error=err)
+                    await asyncio.to_thread(notifier.send, f"❌ Trade failed: {sym} — {err}")
                     return result
                 order_id = res["order_id"]
                 result["order_id"] = order_id
@@ -240,21 +246,26 @@ async def chase_sell(broker: ShoonyaBroker, upstox: UpstoxBroker, leg: dict,
             if status in ("COMPLETE", "FILLED"):
                 result["status"] = "FILLED"
                 log.info("Order FILLED — %s order_id=%s avg_price=%.2f", sym, order_id, ost["avg_price"])
+                await asyncio.to_thread(notifier.send,
+                                        f"✅ Trade taken: SELL {sym} x{qty} @ {ost['avg_price']:.2f}")
                 return result
             if status in ("REJECTED", "CANCELLED", "CANCELED"):
                 reason = ost.get("rejection_reason", "Rejected")
                 log.error("Order %s for %s was %s: %s", order_id, sym, status, reason)
                 result.update(status="FAILED", error=reason)
+                await asyncio.to_thread(notifier.send, f"❌ Trade failed: {sym} — {reason}")
                 return result
 
     log.warning("Order not filled after all phases — %s order_id=%s", sym, order_id)
     result.update(status="PENDING", error="Not filled after all attempts")
+    await asyncio.to_thread(notifier.send,
+                            f"⚠️ {sym} placed but not filled after all attempts (order_id={order_id})")
     return result
 
 
 async def execute_legs(broker: ShoonyaBroker, upstox: UpstoxBroker, legs: list[dict],
-                       product_type: str, dry_run: bool) -> list[dict]:
-    tasks = [asyncio.create_task(chase_sell(broker, upstox, leg, product_type, dry_run))
+                       product_type: str, dry_run: bool, notifier: TelegramNotifier) -> list[dict]:
+    tasks = [asyncio.create_task(chase_sell(broker, upstox, leg, product_type, dry_run, notifier))
              for leg in legs]
     return await asyncio.gather(*tasks)
 
@@ -286,25 +297,44 @@ def main(argv: list[str] | None = None) -> int:
     today = datetime.now(tz).date()
 
     creds = load_config()
+    notifier = TelegramNotifier.from_config(creds)
+
+    now = datetime.now(tz)
+    mode = "DRY-RUN" if args.dry_run else "LIVE"
+    log.info("Telegram notifications %s", "enabled" if notifier.enabled else "disabled")
+    notifier.send(f"🚀 Strangle started\nTime: {now:%Y-%m-%d %H:%M:%S} {tz.key}\nMode: {mode}")
+
+    def _login_line(name: str, r: dict) -> str:
+        ok = r.get("ok")
+        return f"{name}: {'✅ ' + r.get('msg', 'token OK') if ok else '❌ ' + str(r.get('error', 'failed'))}"
+
+    broker = ShoonyaBroker(creds)
+    sh = broker.login()
+
     if not has_upstox_config(creds):
+        notifier.send("Broker login:\n" + _login_line("Shoonya", sh) + "\nUpstox: ❌ not configured")
         log.error("Upstox credentials required for market data — aborting")
         return 2
 
-    broker = ShoonyaBroker(creds)
-    res = broker.login()
-    if not res.get("ok"):
-        log.error("Shoonya login failed: %s", res.get("error"))
-        return 2
-
     upstox = UpstoxBroker(creds)
-    res = upstox.login()
-    if not res.get("ok"):
-        log.error("Upstox login failed: %s", res.get("error"))
+    up = upstox.login()
+
+    notifier.send("Broker login:\n" + _login_line("Shoonya", sh) + "\n" + _login_line("Upstox", up))
+
+    if not sh.get("ok"):
+        log.error("Shoonya login failed: %s", sh.get("error"))
+        notifier.send("❌ Aborting — Shoonya login failed")
+        return 2
+    if not up.get("ok"):
+        log.error("Upstox login failed: %s", up.get("error"))
+        notifier.send("❌ Aborting — Upstox login failed")
         return 2
 
     index = choose_target_index(upstox, cfg, today, args.index)
     if index is None:
-        log.info("No configured index expires today (%s) — nothing to do", today)
+        msg = f"ℹ️ No configured index expires today ({today}) — nothing to do"
+        log.info(msg)
+        notifier.send(msg)
         return 0
 
     idx_cfg = cfg["indices"][index]
@@ -320,15 +350,21 @@ def main(argv: list[str] | None = None) -> int:
     expiry_str = upstox.get_nearest_expiry(index)
     if not expiry_str:
         log.error("Lost expiry for %s at trigger time — aborting", index)
+        notifier.send(f"❌ Aborting — lost expiry for {index} at trigger time")
         return 4
     expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d").date()
 
     legs = prepare_legs(broker, upstox, index, idx_cfg, expiry_str, expiry_date)
     if not legs:
         log.error("No legs prepared for %s — aborting", index)
+        notifier.send(f"❌ Aborting — no legs prepared for {index}")
         return 5
 
-    results = asyncio.run(execute_legs(broker, upstox, legs, idx_cfg["product_type"], args.dry_run))
+    notifier.send("📊 %s legs selected (expiry %s):\n%s" % (
+        index, expiry_date,
+        "\n".join(f"SELL {l['side']} {l['symbol']} @~{l['premium']:.2f} x{l['qty']}" for l in legs)))
+
+    results = asyncio.run(execute_legs(broker, upstox, legs, idx_cfg["product_type"], args.dry_run, notifier))
 
     log.info("=== Strangle complete for %s (expiry %s) ===", index, expiry_date)
     for r in results:
