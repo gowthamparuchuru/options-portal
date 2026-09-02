@@ -117,6 +117,72 @@ def wait_until(trigger_time: str, tz: ZoneInfo, max_late_secs: int) -> bool:
     return False
 
 
+# ── Position sizing (auto-lots) ───────────────────────────────────
+
+DEFAULT_MARGIN_BUFFER_PCT = 10.0
+
+
+def _row_upstox_key(rows: list[dict], leg, side: str) -> str | None:
+    """Upstox instrument key for the strike a selected leg trades."""
+    if leg is None:
+        return None
+    row = next((r for r in rows if r["strike"] == leg.strike), None)
+    if not row:
+        return None
+    return row["ce_key"] if side == "CE" else row["pe_key"]
+
+
+def _auto_lots(broker: ShoonyaBroker, upstox: UpstoxBroker, index: str,
+               ce_key: str | None, pe_key: str | None, lot_size: int,
+               buffer_pct: float) -> int:
+    """Size the strangle to available margin.
+
+    1. Fetch total available margin from Shoonya.
+    2. Ask the Upstox margin calculator for the 1-lot strangle margin (both legs).
+    3. Pad it by ``buffer_pct`` (e.g. 10% turns a 2.5L requirement into 2.75L).
+    4. lots = floor(available / padded-per-lot-margin).
+
+    Returns 0 when margin cannot be determined or funds cover less than 1 lot.
+    """
+    if ce_key is None or pe_key is None:
+        log.error("Auto-lots: missing Upstox instrument key(s) — cannot size %s", index)
+        return 0
+
+    funds = broker.get_available_margin()
+    if not funds or funds.get("available") is None:
+        log.error("Auto-lots: could not fetch available margin from Shoonya")
+        return 0
+    available = float(funds["available"])
+
+    basket = [
+        {"instrument_key": ce_key, "quantity": lot_size, "transaction_type": "SELL", "product": "D"},
+        {"instrument_key": pe_key, "quantity": lot_size, "transaction_type": "SELL", "product": "D"},
+    ]
+    m = upstox.get_basket_margin(basket)
+    one_lot = float(m.get("total_margin") or 0)
+    if m.get("error") or one_lot <= 0:
+        log.error("Auto-lots: Upstox margin calc failed for %s: %s",
+                  index, m.get("error") or "zero margin returned")
+        return 0
+
+    per_lot = one_lot * (1 + buffer_pct / 100.0)
+    lots = int(available // per_lot)
+    log.info("Auto-lots %s: available=%.2f, 1-lot margin=%.2f, +%.0f%% buffer=%.2f -> %d lots",
+             index, available, one_lot, buffer_pct, per_lot, lots)
+    return max(lots, 0)
+
+
+def resolve_lots(broker: ShoonyaBroker, upstox: UpstoxBroker, index: str,
+                 idx_cfg: dict, ce_key: str | None, pe_key: str | None,
+                 lot_size: int) -> int:
+    """Number of lots to trade, honouring ``lots: "auto"`` in the config."""
+    raw = idx_cfg.get("lots", 1)
+    if isinstance(raw, str) and raw.strip().lower() == "auto":
+        buffer_pct = float(idx_cfg.get("margin_buffer_pct", DEFAULT_MARGIN_BUFFER_PCT))
+        return _auto_lots(broker, upstox, index, ce_key, pe_key, lot_size, buffer_pct)
+    return int(raw)
+
+
 # ── Leg preparation ───────────────────────────────────────────────
 
 def prepare_legs(broker: ShoonyaBroker, upstox: UpstoxBroker, index: str,
@@ -135,7 +201,15 @@ def prepare_legs(broker: ShoonyaBroker, upstox: UpstoxBroker, index: str,
         return []
 
     ce_leg, pe_leg = select_strangle_legs(rows, spot, threshold)
-    qty = int(idx_cfg["lots"]) * int(idx_cfg["lot_size"])
+
+    lot_size = int(idx_cfg["lot_size"])
+    ce_key = _row_upstox_key(rows, ce_leg, "CE")
+    pe_key = _row_upstox_key(rows, pe_leg, "PE")
+    lots = resolve_lots(broker, upstox, index, idx_cfg, ce_key, pe_key, lot_size)
+    if lots < 1:
+        log.error("%s: resolved 0 lots (insufficient margin or sizing failed) — aborting", index)
+        return []
+    qty = lots * lot_size
 
     legs: list[dict] = []
     for sel in (ce_leg, pe_leg):
@@ -155,8 +229,7 @@ def prepare_legs(broker: ShoonyaBroker, upstox: UpstoxBroker, index: str,
             log.warning("Configured lot_size %d != broker lot_size %d for %s (%s) — using configured, order may reject",
                         int(idx_cfg["lot_size"]), inst["lot_size"], index, inst["symbol"])
 
-        row = next((r for r in rows if r["strike"] == sel.strike), None)
-        upstox_key = (row["ce_key"] if sel.side == "CE" else row["pe_key"]) if row else None
+        upstox_key = _row_upstox_key(rows, sel, sel.side)
 
         legs.append({
             "side": sel.side,

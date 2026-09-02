@@ -124,13 +124,27 @@ Per-index tunables live in `strangle_config.json` at the project root:
 | `indices.<IDX>.enabled` | Include this index in expiry detection |
 | `indices.<IDX>.trigger_time` | `HH:MM` (in `timezone`) to place the strangle |
 | `indices.<IDX>.premium_threshold` | Sell the furthest-OTM strike whose premium is still above this |
-| `indices.<IDX>.lots` | Number of lots per leg |
+| `indices.<IDX>.lots` | Number of lots per leg, **or `"auto"`** to size to available margin (see below) |
 | `indices.<IDX>.lot_size` | Contract lot size (order qty = `lots × lot_size`) |
+| `indices.<IDX>.margin_buffer_pct` | Extra headroom for `lots: "auto"` (default `10`) |
 | `indices.<IDX>.product_type` | Shoonya product code (`M` = NRML) |
 | `indices.<IDX>.scan_range_pct` | Chain scan window around spot, percent |
 
 > Verify `SENSEX.lot_size` against the current BSE contract before enabling it —
 > it defaults to `20`.
+
+**Auto lot sizing (`lots: "auto"`).** Instead of a fixed count, the strategy
+sizes each leg to the funds you actually have:
+
+1. Fetch total **available margin** from Shoonya (`collateral + cash − used`).
+2. Ask the **Upstox margin calculator** for the margin of a **1-lot** strangle
+   (both selected CE + PE legs, SELL, carry-forward product).
+3. Pad that by `margin_buffer_pct` (default `10%`) — e.g. a `2.5L` requirement
+   becomes `2.75L`.
+4. `lots = floor(available ÷ padded-per-lot-margin)`.
+
+If margin can't be fetched/computed, or the funds don't cover even one padded
+lot, the run aborts with exit code `5` (no legs prepared) rather than guessing.
 
 ### Running it
 
