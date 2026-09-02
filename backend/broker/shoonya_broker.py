@@ -50,6 +50,12 @@ MONTH_ABBR = {
     7: "JUL", 8: "AUG", 9: "SEP", 10: "OCT", 11: "NOV", 12: "DEC",
 }
 
+# Shoonya BFO (SENSEX) weekly month codes: 1-9 for Jan-Sep, then O/N/D.
+MONTH_CODE = {
+    1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6",
+    7: "7", 8: "8", 9: "9", 10: "O", 11: "N", 12: "D",
+}
+
 log = logging.getLogger("shoonya")
 
 SESSION_CACHE = Path(tempfile.gettempdir()) / ".shoonya_session_cache"
@@ -234,12 +240,30 @@ class ShoonyaBroker(BrokerInterface):
 
     # ── Symbol building ────────────────────────────────────────────
 
+    def _ensure_symbols(self, index_name: str) -> None:
+        """Ensure today's symbols master for *index_name* is cached on disk.
+
+        download_symbols() is a no-op when the cached file is already from
+        today, so this stays cheap to call on every lookup. Any download
+        failure is logged and swallowed so an absent/stale file degrades to
+        the constructed-symbol fallback rather than crashing the caller.
+        """
+        cfg = self.INDEX_CONFIG.get(index_name)
+        if cfg is None:
+            return
+        try:
+            self.download_symbols(cfg["symbols_url"], cfg["options_exchange"])
+        except Exception:
+            log.warning("Could not refresh %s symbols master",
+                        cfg["options_exchange"], exc_info=True)
+
     def _lookup_symbol(self, index_name: str, expiry: date,
                        strike: float, option_type: str) -> str | None:
         """Look up the exact TradingSymbol from Shoonya's symbols file."""
         cfg = self.INDEX_CONFIG.get(index_name)
         if cfg is None:
             return None
+        self._ensure_symbols(index_name)
         prefix = cfg["options_exchange"]
         path = Path(tempfile.gettempdir()) / f"{prefix}_symbols.txt"
         if not path.exists():
@@ -274,13 +298,32 @@ class ShoonyaBroker(BrokerInterface):
 
         log.warning("Symbol lookup miss for %s %s %s %s — falling back to constructed symbol",
                     index_name, expiry, strike, option_type)
+        return self._construct_symbol(index_name, expiry, strike, option_type)
+
+    def _construct_symbol(self, index_name: str, expiry: date,
+                          strike: float, option_type: str) -> str:
+        """Construct a trading symbol when the master lookup misses.
+
+        NSE  (NFO/NIFTY):  {IDX}{DD}{MMM}{YY}{C|P}{STRIKE}          e.g. NIFTY08SEP26C19000
+        BSE  (BFO/SENSEX): monthly {IDX}{YY}{MMM}{STRIKE}{CE|PE}    e.g. SENSEX26SEP79000CE
+                           weekly  {IDX}{YY}{Mcode}{DD}{STRIKE}{CE|PE} e.g. SENSEX2690379000CE
+        """
+        from .expiry_utils import is_monthly_expiry
+
+        cfg = self.INDEX_CONFIG.get(index_name, {})
         prefix = self.SYMBOL_PREFIX.get(index_name, index_name)
-        dd = f"{expiry.day:02d}"
-        mon = MONTH_ABBR[expiry.month]
         yy = f"{expiry.year % 100:02d}"
-        ot = option_type[0]  # "CE" → "C", "PE" → "P"
-        strike_str = str(int(strike)) if strike == int(strike) else str(strike)
-        return f"{prefix}{dd}{mon}{yy}{ot}{strike_str}"
+        strike_str = str(int(strike)) if float(strike) == int(strike) else str(strike)
+        ot = option_type.upper()
+        if len(ot) == 1:
+            ot = "CE" if ot == "C" else "PE"
+
+        if cfg.get("options_exchange") == "BFO":
+            if is_monthly_expiry(expiry, index_name):
+                return f"{prefix}{yy}{MONTH_ABBR[expiry.month]}{strike_str}{ot}"
+            return f"{prefix}{yy}{MONTH_CODE[expiry.month]}{expiry.day:02d}{strike_str}{ot}"
+
+        return f"{prefix}{expiry.day:02d}{MONTH_ABBR[expiry.month]}{yy}{ot[0]}{strike_str}"
 
     def lookup_option(self, index_name: str, expiry: date,
                       strike: float, option_type: str) -> dict | None:
@@ -292,6 +335,7 @@ class ShoonyaBroker(BrokerInterface):
         cfg = self.INDEX_CONFIG.get(index_name)
         if cfg is None:
             return None
+        self._ensure_symbols(index_name)
         path = Path(tempfile.gettempdir()) / f'{cfg["options_exchange"]}_symbols.txt'
         if not path.exists():
             return None
