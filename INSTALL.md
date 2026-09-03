@@ -120,13 +120,14 @@ Per-index tunables live in `strangle_config.json` at the project root:
 |-----|---------|
 | `timezone` | Timezone for the trigger-time wait (default `Asia/Kolkata`) |
 | `max_late_secs` | Abort if launched more than this many seconds past the trigger |
+| `margin_buffer_pct` | Global default extra headroom for `lots: "auto"` (default `10`) |
 | `index_priority` | Order to resolve ties when multiple indices expire the same day |
 | `indices.<IDX>.enabled` | Include this index in expiry detection |
 | `indices.<IDX>.trigger_time` | `HH:MM` (in `timezone`) to place the strangle |
 | `indices.<IDX>.premium_threshold` | Sell the furthest-OTM strike whose premium is still above this |
 | `indices.<IDX>.lots` | Number of lots per leg, **or `"auto"`** to size to available margin (see below) |
 | `indices.<IDX>.lot_size` | Contract lot size (order qty = `lots × lot_size`) |
-| `indices.<IDX>.margin_buffer_pct` | Extra headroom for `lots: "auto"` (default `10`) |
+| `indices.<IDX>.margin_buffer_pct` | Per-index override of `margin_buffer_pct` for `lots: "auto"` |
 | `indices.<IDX>.product_type` | Shoonya product code (`M` = NRML) |
 | `indices.<IDX>.scan_range_pct` | Chain scan window around spot, percent |
 
@@ -139,8 +140,10 @@ sizes each leg to the funds you actually have:
 1. Fetch total **available margin** from Shoonya (`collateral + cash − used`).
 2. Ask the **Upstox margin calculator** for the margin of a **1-lot** strangle
    (both selected CE + PE legs, SELL, carry-forward product).
-3. Pad that by `margin_buffer_pct` (default `10%`) — e.g. a `2.5L` requirement
-   becomes `2.75L`.
+3. Pad that by the resolved margin buffer — e.g. a `2.5L` requirement at `10%`
+   becomes `2.75L`. The percentage is configurable, resolved in this order:
+   `indices.<IDX>.margin_buffer_pct` → top-level `margin_buffer_pct` → `10`.
+   Invalid or negative values fall back to `10`.
 4. `lots = floor(available ÷ padded-per-lot-margin)`.
 
 If margin can't be fetched/computed, or the funds don't cover even one padded

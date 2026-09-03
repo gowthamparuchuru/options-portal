@@ -1,23 +1,26 @@
 {
   "timezone": "Asia/Kolkata",
   "max_late_secs": 900,
+  "margin_buffer_pct": 7.0,
   "index_priority": ["NIFTY", "SENSEX"],
   "indices": {
     "NIFTY": {
       "enabled": true,
       "trigger_time": "09:16",
-      "premium_threshold": 0.9,
+      "premium_threshold": 1,
       "lots": 1,
       "lot_size": 65,
+      "margin_buffer_pct": 7.0,
       "product_type": "M",
       "scan_range_pct": 6.0
     },
     "SENSEX": {
       "enabled": true,
       "trigger_time": "09:16",
-      "premium_threshold": 2.25,
+      "premium_threshold": 2.5,
       "lots": 1,
       "lot_size": 20,
+      "margin_buffer_pct": 7.0,
       "product_type": "M",
       "scan_range_pct": 6.0
     }

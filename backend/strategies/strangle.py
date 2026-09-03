@@ -122,6 +122,37 @@ def wait_until(trigger_time: str, tz: ZoneInfo, max_late_secs: int) -> bool:
 DEFAULT_MARGIN_BUFFER_PCT = 10.0
 
 
+def is_auto_lots(idx_cfg: dict) -> bool:
+    raw = idx_cfg.get("lots", 1)
+    return isinstance(raw, str) and raw.strip().lower() == "auto"
+
+
+def resolve_margin_buffer_pct(cfg: dict, idx_cfg: dict) -> float:
+    """Auto-lots margin headroom, in percent.
+
+    Resolution order (first hit wins):
+      1. ``indices.<IDX>.margin_buffer_pct``  (per-index override)
+      2. ``margin_buffer_pct``                (top-level default)
+      3. DEFAULT_MARGIN_BUFFER_PCT            (10%)
+
+    Invalid or negative values fall back to the built-in default.
+    """
+    raw = idx_cfg.get("margin_buffer_pct", cfg.get("margin_buffer_pct"))
+    if raw is None:
+        return DEFAULT_MARGIN_BUFFER_PCT
+    try:
+        pct = float(raw)
+    except (TypeError, ValueError):
+        log.warning("Invalid margin_buffer_pct %r — using default %.1f%%",
+                    raw, DEFAULT_MARGIN_BUFFER_PCT)
+        return DEFAULT_MARGIN_BUFFER_PCT
+    if pct < 0:
+        log.warning("Negative margin_buffer_pct %.2f — using default %.1f%%",
+                    pct, DEFAULT_MARGIN_BUFFER_PCT)
+        return DEFAULT_MARGIN_BUFFER_PCT
+    return pct
+
+
 def _row_upstox_key(rows: list[dict], leg, side: str) -> str | None:
     """Upstox instrument key for the strike a selected leg trades."""
     if leg is None:
@@ -174,19 +205,18 @@ def _auto_lots(broker: ShoonyaBroker, upstox: UpstoxBroker, index: str,
 
 def resolve_lots(broker: ShoonyaBroker, upstox: UpstoxBroker, index: str,
                  idx_cfg: dict, ce_key: str | None, pe_key: str | None,
-                 lot_size: int) -> int:
+                 lot_size: int, buffer_pct: float = DEFAULT_MARGIN_BUFFER_PCT) -> int:
     """Number of lots to trade, honouring ``lots: "auto"`` in the config."""
-    raw = idx_cfg.get("lots", 1)
-    if isinstance(raw, str) and raw.strip().lower() == "auto":
-        buffer_pct = float(idx_cfg.get("margin_buffer_pct", DEFAULT_MARGIN_BUFFER_PCT))
+    if is_auto_lots(idx_cfg):
         return _auto_lots(broker, upstox, index, ce_key, pe_key, lot_size, buffer_pct)
-    return int(raw)
+    return int(idx_cfg.get("lots", 1))
 
 
 # ── Leg preparation ───────────────────────────────────────────────
 
 def prepare_legs(broker: ShoonyaBroker, upstox: UpstoxBroker, index: str,
-                 idx_cfg: dict, expiry_str: str, expiry_date: date) -> list[dict]:
+                 idx_cfg: dict, expiry_str: str, expiry_date: date,
+                 buffer_pct: float = DEFAULT_MARGIN_BUFFER_PCT) -> list[dict]:
     instrument_key = UpstoxBroker.INDEX_CONFIG[index]["instrument_key"]
     spot = upstox.get_ltp(instrument_key)
     if spot is None:
@@ -205,7 +235,7 @@ def prepare_legs(broker: ShoonyaBroker, upstox: UpstoxBroker, index: str,
     lot_size = int(idx_cfg["lot_size"])
     ce_key = _row_upstox_key(rows, ce_leg, "CE")
     pe_key = _row_upstox_key(rows, pe_leg, "PE")
-    lots = resolve_lots(broker, upstox, index, idx_cfg, ce_key, pe_key, lot_size)
+    lots = resolve_lots(broker, upstox, index, idx_cfg, ce_key, pe_key, lot_size, buffer_pct)
     if lots < 1:
         log.error("%s: resolved 0 lots (insufficient margin or sizing failed) — aborting", index)
         return []
@@ -381,18 +411,40 @@ def main(argv: list[str] | None = None) -> int:
         ok = r.get("ok")
         return f"{name}: {'✅ ' + r.get('msg', 'token OK') if ok else '❌ ' + str(r.get('error', 'failed'))}"
 
+    def _margin_block(b: ShoonyaBroker, login_result: dict) -> str:
+        """Shoonya funds summary for the startup Telegram message (best-effort)."""
+        if not login_result.get("ok"):
+            return "\n💰 Shoonya margin: unavailable (login failed)"
+        try:
+            funds = b.get_available_margin()
+        except Exception:
+            log.warning("Could not fetch Shoonya margin", exc_info=True)
+            funds = None
+        if not funds:
+            return "\n💰 Shoonya margin: unavailable"
+        return (
+            "\n💰 Shoonya funds:"
+            f"\nAvailable to trade: ₹{funds['available']:,.2f}"
+            f"\nCash: ₹{funds['cash']:,.2f} | Collateral: ₹{funds['collateral']:,.2f}"
+            f"\nMargin used: ₹{funds['margin_used']:,.2f}"
+        )
+
     broker = ShoonyaBroker(creds)
     sh = broker.login()
 
     if not has_upstox_config(creds):
-        notifier.send("Broker login:\n" + _login_line("Shoonya", sh) + "\nUpstox: ❌ not configured")
+        notifier.send("Broker login:\n" + _login_line("Shoonya", sh)
+                      + "\nUpstox: ❌ not configured"
+                      + _margin_block(broker, sh))
         log.error("Upstox credentials required for market data — aborting")
         return 2
 
     upstox = UpstoxBroker(creds)
     up = upstox.login()
 
-    notifier.send("Broker login:\n" + _login_line("Shoonya", sh) + "\n" + _login_line("Upstox", up))
+    notifier.send("Broker login:\n" + _login_line("Shoonya", sh)
+                  + "\n" + _login_line("Upstox", up)
+                  + _margin_block(broker, sh))
 
     if not sh.get("ok"):
         log.error("Shoonya login failed: %s", sh.get("error"))
@@ -411,7 +463,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     idx_cfg = cfg["indices"][index]
-    log.info("Target index: %s — %s", index, idx_cfg)
+    buffer_pct = resolve_margin_buffer_pct(cfg, idx_cfg)
+    auto = is_auto_lots(idx_cfg)
+    sizing = (f"auto (margin buffer {buffer_pct:.1f}%)" if auto
+              else f"fixed {idx_cfg.get('lots', 1)} lot(s)")
+    log.info("Target index: %s — %s (sizing: %s)", index, idx_cfg, sizing)
+    notifier.send(f"🎯 Target index: {index}\nSizing: {sizing}")
 
     if not args.now:
         if not wait_until(idx_cfg["trigger_time"], tz, int(cfg.get("max_late_secs", 900))):
@@ -427,14 +484,15 @@ def main(argv: list[str] | None = None) -> int:
         return 4
     expiry_date = datetime.strptime(expiry_str, "%Y-%m-%d").date()
 
-    legs = prepare_legs(broker, upstox, index, idx_cfg, expiry_str, expiry_date)
+    legs = prepare_legs(broker, upstox, index, idx_cfg, expiry_str, expiry_date, buffer_pct)
     if not legs:
         log.error("No legs prepared for %s — aborting", index)
         notifier.send(f"❌ Aborting — no legs prepared for {index}")
         return 5
 
-    notifier.send("📊 %s legs selected (expiry %s):\n%s" % (
-        index, expiry_date,
+    lots_used = legs[0]["qty"] // max(int(idx_cfg["lot_size"]), 1)
+    notifier.send("📊 %s legs selected (expiry %s)\nLots: %d — %s\n%s" % (
+        index, expiry_date, lots_used, sizing,
         "\n".join(f"SELL {l['side']} {l['symbol']} @~{l['premium']:.2f} x{l['qty']}" for l in legs)))
 
     results = asyncio.run(execute_legs(broker, upstox, legs, idx_cfg["product_type"], args.dry_run, notifier))
