@@ -373,6 +373,28 @@ async def execute_legs(broker: ShoonyaBroker, upstox: UpstoxBroker, legs: list[d
     return await asyncio.gather(*tasks)
 
 
+def post_trade_summary(broker: ShoonyaBroker, results: list[dict], dry_run: bool) -> str:
+    """Telegram summary after execution: premium collected + remaining Shoonya margin."""
+    counted = [r for r in results if r["status"] in ("FILLED", "DRY_RUN")]
+    total = sum(r["avg_price"] * r["qty"] for r in counted)
+    lines = [("🧪 [DRY-RUN] " if dry_run else "") + "📈 Post-trade summary"]
+    for r in counted:
+        lines.append(f"{r['side']} {r['symbol']}: {r['avg_price']:.2f} x{r['qty']} = ₹{r['avg_price'] * r['qty']:,.2f}")
+    lines.append(f"Premium collected: ₹{total:,.2f}" + (" (estimated)" if dry_run else ""))
+
+    try:
+        funds = broker.get_available_margin()
+    except Exception:
+        log.warning("Could not fetch Shoonya margin after trade", exc_info=True)
+        funds = None
+    if funds:
+        lines.append(f"Available margin: ₹{funds['available']:,.2f}")
+        lines.append(f"Margin used: ₹{funds['margin_used']:,.2f}")
+    else:
+        lines.append("Available margin: unavailable")
+    return "\n".join(lines)
+
+
 # ── Entry point ───────────────────────────────────────────────────
 
 def main(argv: list[str] | None = None) -> int:
@@ -502,6 +524,7 @@ def main(argv: list[str] | None = None) -> int:
         log.info("  %s %s strike=%.0f qty=%d -> %s avg_price=%.2f %s",
                  r["side"], r["symbol"], r["strike"], r["qty"], r["status"],
                  r["avg_price"], f"({r['error']})" if r["error"] else "")
+    notifier.send(post_trade_summary(broker, results, args.dry_run))
 
     failed = [r for r in results if r["status"] == "FAILED"]
     return 6 if failed else 0

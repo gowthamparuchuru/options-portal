@@ -222,7 +222,8 @@ tail -f ~/options-portal/logs/strangle.log
 
 Optional. When both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set in
 `.env`, the strangle script sends alerts on: startup, broker login status,
-selected strikes, each leg (trade taken / failed / not filled), and no-op days.
+selected strikes, each leg (trade taken / failed / not filled), a post-trade
+summary (premium collected + remaining Shoonya available margin), and no-op days.
 If either is unset, notifications are silently disabled.
 
 ### Get the two values
